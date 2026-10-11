@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Your own virtual environments
+venv/
+.venv/
+env/
+
+# Throwaway venvs created per target project by runnability_check
+_venv_*/
+**/_venv_*/
+
+# Extracted zip contents, regenerated on every run
+*_extracted/
+**/*_extracted/
+
+# Secrets / local config
+.env
+.env.*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
