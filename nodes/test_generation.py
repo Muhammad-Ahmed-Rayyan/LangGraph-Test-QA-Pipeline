@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from state import AgentState, TestCaseSpec, TestSpec
@@ -110,7 +111,8 @@ def test_generation_node(state: AgentState) -> AgentState:
 
     project = state["project"]
     root_dir = Path(project["root_dir"])
-    venv_python = str((root_dir.parent / f"_venv_{root_dir.name}" / "bin" / "python").resolve())
+    venv_bin = "Scripts" if sys.platform == "win32" else "bin"
+    venv_python = str((root_dir.parent / f"_venv_{root_dir.name}" / venv_bin / "python").resolve())
 
     settings_module = _find_settings_module(root_dir)
     if settings_module is None:

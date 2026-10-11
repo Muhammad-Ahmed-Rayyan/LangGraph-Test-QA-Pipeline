@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import zipfile
 
 from state import AgentState, ProjectProfile
@@ -9,6 +10,8 @@ DOC_FILENAMES = {"readme.md", "readme.rst", "readme.txt", "readme", "srs.md", "s
 
 
 def _extract_zip(zip_path: str, dest_dir: str) -> str:
+    if os.path.isdir(dest_dir):
+        shutil.rmtree(dest_dir)
     os.makedirs(dest_dir, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(dest_dir)
