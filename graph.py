@@ -57,7 +57,12 @@ if __name__ == "__main__":
         "runnable": result["runnable"],
         "status": result["status"],
         "setup_errors": [
-            {"stage": e["stage"], "message": e["message"]} for e in result["setup_errors"]
+            {
+                "stage": e["stage"],
+                "message": e["message"],
+                "raw_output": e["raw_output"][-600:],
+            }
+            for e in result["setup_errors"]
         ],
         "test_specs": result.get("test_specs", []),
         "generated_test_files": list(result.get("test_files", {}).keys()),
