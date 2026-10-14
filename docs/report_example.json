@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.0",
+  "description": "Contract between the Testing/QA agent and the Software Development agent. The report node writes one object shaped like the examples below. 'outcome' tells the Developer agent which kind of problem it has.",
+  "outcome_values": {
+    "blocked": "Project could not install or boot. No tests were written or run. Fix setup_errors.",
+    "execution_failed": "Tests were written but the test run itself crashed (e.g. database unreachable). Not a code fault in the tests.",
+    "tests_failed": "Tests ran and some failed. Fix the code behind each entry in faults.",
+    "tests_passed": "Tests ran and all passed. Nothing to fix."
+  },
+  "examples": {
+    "blocked": {
+      "schema_version": "1.0",
+      "outcome": "blocked",
+      "project": {"name": "Django-crud_private-main", "framework": "django", "apps": ["crud_app"], "has_docs": true},
+      "setup": {
+        "runnable": false,
+        "errors": [
+          {
+            "stage": "django_check",
+            "message": "manage.py check failed - project does not boot",
+            "error_summary": "ModuleNotFoundError: No module named 'module_that_does_not_exist'",
+            "raw_output": "...last lines of the real traceback..."
+          }
+        ]
+      },
+      "execution_error": null,
+      "summary": {"total": 0, "passed": 0, "failed": 0, "errored": 0, "by_type": {"unit": 0, "integration": 0, "system": 0}},
+      "faults": []
+    },
+    "execution_failed": {
+      "schema_version": "1.0",
+      "outcome": "execution_failed",
+      "project": {"name": "Django-crud_private-main", "framework": "django", "apps": ["crud_app"], "has_docs": true},
+      "setup": {"runnable": true, "errors": []},
+      "execution_error": {
+        "message": "Test run crashed before any test executed",
+        "error_summary": "django.db.utils.OperationalError: connection to server failed",
+        "raw_output": "...last lines of the real output..."
+      },
+      "summary": {"total": 0, "passed": 0, "failed": 0, "errored": 0, "by_type": {"unit": 0, "integration": 0, "system": 0}},
+      "faults": []
+    },
+    "tests_failed": {
+      "schema_version": "1.0",
+      "outcome": "tests_failed",
+      "project": {"name": "Django-crud_private-main", "framework": "django", "apps": ["crud_app"], "has_docs": true},
+      "setup": {"runnable": true, "errors": []},
+      "execution_error": null,
+      "summary": {"total": 3, "passed": 2, "failed": 1, "errored": 0, "by_type": {"unit": 3, "integration": 0, "system": 0}},
+      "faults": [
+        {
+          "id": "F1",
+          "test_name": "crud_app.tests_generated.ProductModelTests.test_price_round_trips",
+          "test_type": "unit",
+          "app": "crud_app",
+          "category": "assertion_error",
+          "message": "AssertionError: 2 != 1",
+          "traceback": "...full traceback...",
+          "suspected_location": "crud_app/models.py"
+        }
+      ]
+    },
+    "tests_passed": {
+      "schema_version": "1.0",
+      "outcome": "tests_passed",
+      "project": {"name": "Django-crud_private-main", "framework": "django", "apps": ["crud_app"], "has_docs": true},
+      "setup": {"runnable": true, "errors": []},
+      "execution_error": null,
+      "summary": {"total": 3, "passed": 3, "failed": 0, "errored": 0, "by_type": {"unit": 3, "integration": 0, "system": 0}},
+      "faults": []
+    }
+  }
+}
