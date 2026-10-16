@@ -1,0 +1,8 @@
+Found 2 test(s).
+test_name_round_trips (crud_app.tests_generated.ProductModelTests.test_name_round_trips) ... ok
+test_price_round_trips (crud_app.tests_generated.ProductModelTests.test_price_round_trips) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.009s
+
+OK
