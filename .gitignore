@@ -17,6 +17,9 @@ _venv_*/
 *_extracted/
 **/*_extracted/
 
+# Generated QA reports
+reports/
+
 # Secrets / local config
 .env
 .env.*

@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from nodes.env_utils import venv_python
+from nodes.env_utils import find_settings_module, venv_python
 from state import AgentState, TestCaseSpec, TestSpec
 
 TIMEOUT_SECONDS = 60
@@ -37,14 +37,6 @@ for model in apps.get_app_config({app_label!r}).get_models():
     out.append({{"model": model.__name__, "fields": fields}})
 print(json.dumps(out))
 """
-
-
-def _find_settings_module(root_dir: Path) -> str | None:
-    """Locate '<project_pkg>.settings' by finding the folder that has settings.py."""
-    for settings_py in root_dir.rglob("settings.py"):
-        pkg = settings_py.parent.name
-        return f"{pkg}.settings"
-    return None
 
 
 def _introspect_app_models(python_exe: str, root_dir: Path, settings_module: str, app_label: str) -> list[dict]:
@@ -130,7 +122,7 @@ def test_generation_node(state: AgentState) -> AgentState:
     root_dir = Path(project["root_dir"])
     python_exe = venv_python(root_dir)
 
-    settings_module = _find_settings_module(root_dir)
+    settings_module = find_settings_module(root_dir)
     if settings_module is None:
         raise RuntimeError("Could not locate settings.py to introspect models")
 
@@ -158,3 +150,6 @@ def test_generation_node(state: AgentState) -> AgentState:
         "test_specs": test_specs,
         "test_files": test_files,
     }
+
+
+test_generation_node.__test__ = False

@@ -1,0 +1,25 @@
+Found 2 test(s).
+test_name_round_trips (crud_app.tests_generated.ProductModelTests.test_name_round_trips) ... ok
+test_price_round_trips (crud_app.tests_generated.ProductModelTests.test_price_round_trips) ... FAIL
+test_missing_row (crud_app.tests_integration_generated.ProductTests.test_missing_row) ... ERROR
+
+======================================================================
+FAIL: test_price_round_trips (crud_app.tests_generated.ProductModelTests.test_price_round_trips)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\project\crud_app\tests_generated.py", line 12, in test_price_round_trips
+    self.assertEqual(obj.price, 1)
+AssertionError: 2 != 1
+
+======================================================================
+ERROR: test_missing_row (crud_app.tests_integration_generated.ProductTests.test_missing_row)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\project\crud_app\views.py", line 22, in product_detail
+    Product.objects.get(pk=100)
+django.db.utils.OperationalError: no such table: crud_app_product
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.012s
+
+FAILED (failures=1, errors=1)

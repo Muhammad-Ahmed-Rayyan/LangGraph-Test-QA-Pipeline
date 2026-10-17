@@ -26,12 +26,18 @@ class TestCaseSpec(TypedDict):
     checks: str
 
 
+TestCaseSpec.__test__ = False
+
+
 class TestSpec(TypedDict):
     """What we plan to test, before any test code is written."""
     app: str
     test_type: Literal["unit", "integration", "system"]
     target: str
     cases: list[TestCaseSpec]
+
+
+TestSpec.__test__ = False
 
 
 class TestOutcome(TypedDict):
@@ -41,6 +47,9 @@ class TestOutcome(TypedDict):
     outcome: Literal["passed", "failed", "error"]
     message: str
     traceback: str
+
+
+TestOutcome.__test__ = False
 
 
 class TestResults(TypedDict):
@@ -53,6 +62,8 @@ class TestResults(TypedDict):
     tests: list[TestOutcome]
     raw_output: str
 
+
+TestResults.__test__ = False
 
 class AgentState(TypedDict, total=False):
     zip_path: str
