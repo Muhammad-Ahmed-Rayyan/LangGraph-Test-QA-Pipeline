@@ -8,6 +8,7 @@ import pytest
 
 import nodes.report as report_module
 import nodes.test_execution as execution_module
+import nodes.test_generation as generation_module
 from graph import build_graph
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -203,3 +204,142 @@ def test_buggy_fixture_reports_only_the_corrupted_price():
     assert faults[0]["message"] == "AssertionError: 2 != 1"
     assert faults[0]["suspected_location"].endswith("crud_app/models.py")
     assert _written_report("Django-crud_private-main")["outcome"] == "tests_failed"
+
+
+# --- unit test generator: field types and relations (D3) ---------------------
+
+
+def _field(name, field_type, **extra):
+    base = {
+        "name": name, "type": field_type, "related": None, "null": False,
+        "has_default": False, "empty_strings_allowed": field_type in {"CharField", "TextField", "FileField"},
+        "auto_created": False, "auto_now": False, "max_digits": None, "decimal_places": None,
+    }
+    return {**base, **extra}
+
+
+def _model(label, fields, **extra):
+    app_label, name = label.split(".")
+    base = {
+        "label": label, "model": name, "app_label": app_label, "app_name": app_label,
+        "managed": True, "proxy": False,
+        "fields": [_field("id", "BigAutoField", auto_created=True), *fields],
+    }
+    return {**base, **extra}
+
+
+def _planner(models, use_tz=True):
+    return generation_module._Planner({m["label"]: m for m in models}, use_tz)
+
+
+def test_every_requested_field_type_has_a_sample_value():
+    wanted = {
+        "CharField", "TextField", "BooleanField", "IntegerField", "FloatField", "EmailField",
+        "DateField", "DateTimeField", "DecimalField", "URLField", "SlugField",
+        "PositiveIntegerField", "BigIntegerField", "UUIDField",
+    }
+    assert wanted <= set(generation_module._FIELD_SAMPLE_VALUES)
+
+
+def test_datetime_and_decimal_samples_follow_project_settings():
+    datetime_field = _field("when", "DateTimeField")
+    assert "tzinfo" in generation_module._sample_expr(datetime_field, use_tz=True)
+    assert "tzinfo" not in generation_module._sample_expr(datetime_field, use_tz=False)
+
+    fits = _field("price", "DecimalField", max_digits=6, decimal_places=2)
+    only_fraction = _field("rate", "DecimalField", max_digits=3, decimal_places=3)
+    assert generation_module._sample_expr(fits, True) == 'decimal.Decimal("1")'
+    assert generation_module._sample_expr(only_fraction, True) == 'decimal.Decimal("0.1")'
+
+
+def test_planner_creates_related_objects_first_and_reuses_shared_ones():
+    publisher = _model("shop.Publisher", [_field("name", "CharField")])
+    author = _model("shop.Author", [_field("publisher", "ForeignKey", related="shop.Publisher")])
+    book = _model("shop.Book", [
+        _field("author", "ForeignKey", related="shop.Author"),
+        _field("publisher", "ForeignKey", related="shop.Publisher"),
+    ])
+
+    plan = _planner([publisher, author, book]).plan("shop.Book")
+
+    assert plan.ok
+    created = [line.split(" = ")[0] for line in plan.setup_lines]
+    assert created == ["rel_shop_publisher", "rel_shop_author"]   # one Publisher shared by both relations
+    assert dict(plan.args) == {"author": "rel_shop_author", "publisher": "rel_shop_publisher"}
+
+
+def test_planner_omits_optional_self_reference_but_skips_required_one():
+    optional = _model("shop.Category", [_field("parent", "ForeignKey", related="shop.Category", null=True)])
+    required = _model("shop.Node", [_field("parent", "ForeignKey", related="shop.Node")])
+
+    assert _planner([optional]).plan("shop.Category").args == []
+    skipped = _planner([required]).plan("shop.Node")
+    assert not skipped.ok
+    assert "cycle" in skipped.reason
+
+
+def test_planner_stops_at_the_depth_limit():
+    chain = [_model(f"shop.M{i}", [_field("next", "ForeignKey", related=f"shop.M{i + 1}")]) for i in range(6)]
+    chain.append(_model("shop.M6", []))
+
+    plan = _planner(chain).plan("shop.M0")
+
+    assert not plan.ok
+    assert "deep" in plan.reason
+
+
+def test_planner_omits_file_fields_and_skips_unfillable_required_fields():
+    with_file = _model("shop.Doc", [_field("title", "CharField"), _field("upload", "FileField")])
+    with_json = _model("shop.Blob", [_field("payload", "JSONField")])
+    optional_json = _model("shop.Opt", [_field("payload", "JSONField", null=True)])
+    unmanaged = _model("shop.Legacy", [], managed=False)
+
+    assert [name for name, _ in _planner([with_file]).plan("shop.Doc").args] == ["title"]
+    assert "JSONField" in _planner([with_json]).plan("shop.Blob").reason
+    assert _planner([optional_json]).plan("shop.Opt").ok
+    assert not _planner([unmanaged]).plan("shop.Legacy").ok
+
+
+def test_rendered_test_file_is_valid_python_and_names_foreign_models_without_clashes():
+    user = _model("auth.User", [_field("username", "CharField")], app_name="django.contrib.auth")
+    other_review = _model("other.Review", [_field("text", "TextField")], app_name="other")
+    review = _model("shop.Review", [
+        _field("reviewer", "ForeignKey", related="auth.User"),
+        _field("echo", "ForeignKey", related="other.Review"),
+        _field("posted", "DateField"),
+    ])
+    planner = _planner([user, other_review, review])
+    plan = planner.plan("shop.Review")
+    spec = generation_module._build_spec("shop", review, plan)
+
+    content = generation_module._render_app_test_file([(spec, review, plan)], planner.models)
+
+    compile(content, "tests_generated.py", "exec")
+    assert "from django.contrib.auth.models import User" in content
+    assert "from other.models import Review as Review_other" in content
+    assert "import datetime" in content
+    assert "<<" not in content
+
+
+def test_skipped_model_records_why_and_gets_no_cases():
+    blob = _model("shop.Blob", [_field("payload", "JSONField")])
+    plan = _planner([blob]).plan("shop.Blob")
+
+    spec = generation_module._build_spec("shop", blob, plan)
+
+    assert spec["cases"] == []
+    assert "JSONField" in spec["skipped_reason"]
+
+
+@pytest.mark.slow
+def test_field_types_fixture_generates_passing_tests_for_relations_and_dates():
+    result = _run_fixture("field_types_example.zip")
+
+    assert result["report_json"]["outcome"] == "tests_passed"
+    summary = result["report_json"]["summary"]
+    assert summary["total"] > 0 and summary["passed"] == summary["total"]
+    names = [test["name"] for test in result["test_results"]["tests"]]
+    assert any(name.endswith("BookModelTests.test_author_relation_round_trips") for name in names)
+    assert any(name.endswith("BookModelTests.test_published_at_round_trips") for name in names)
+    skipped = {spec["target"]: spec["skipped_reason"] for spec in result["test_specs"] if "skipped_reason" in spec}
+    assert list(skipped) == ["Archive"]

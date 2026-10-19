@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 class SetupError(TypedDict):
@@ -35,6 +35,10 @@ class TestSpec(TypedDict):
     test_type: Literal["unit", "integration", "system"]
     target: str
     cases: list[TestCaseSpec]
+    # Set when the generator could not build a valid object for this model
+    # (for example a required field of an unsupported type). The model gets no
+    # test class, and the reason is recorded here instead of guessing.
+    skipped_reason: NotRequired[str]
 
 
 TestSpec.__test__ = False
