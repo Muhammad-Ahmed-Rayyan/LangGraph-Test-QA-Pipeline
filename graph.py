@@ -3,8 +3,10 @@ from __future__ import annotations
 from langgraph.graph import END, StateGraph
 
 from nodes.ingestion import ingestion_node
+from nodes.integration_generation import integration_generation_node
 from nodes.report import report_node
 from nodes.runnability_check import runnability_check_node
+from nodes.system_generation import system_generation_node
 from nodes.test_execution import test_execution_node
 from nodes.test_generation import test_generation_node
 from state import AgentState
@@ -20,6 +22,8 @@ def build_graph():
     graph.add_node("ingestion", ingestion_node)
     graph.add_node("runnability_check", runnability_check_node)
     graph.add_node("test_generation", test_generation_node)
+    graph.add_node("integration_generation", integration_generation_node)
+    graph.add_node("system_generation", system_generation_node)
     graph.add_node("test_execution", test_execution_node)
     graph.add_node("report", report_node)
 
@@ -31,7 +35,9 @@ def build_graph():
         route_after_runnability_check,
         {"test_generation": "test_generation", "report": "report"},
     )
-    graph.add_edge("test_generation", "test_execution")
+    graph.add_edge("test_generation", "integration_generation")
+    graph.add_edge("integration_generation", "system_generation")
+    graph.add_edge("system_generation", "test_execution")
     graph.add_edge("test_execution", "report")
     graph.add_edge("report", END)
 

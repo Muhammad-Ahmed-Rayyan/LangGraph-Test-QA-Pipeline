@@ -38,6 +38,13 @@ _FIELD_SAMPLE_VALUES = {
     "UUIDField": 'uuid.UUID("12345678-1234-5678-1234-567812345678")',
 }
 
+# A valid 1x1 PNG, so an ImageField accepts the upload.
+TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+_IMAGE_UPLOAD = 'SimpleUploadedFile("sample.png", TINY_PNG, content_type="image/png")'
+_FILE_UPLOAD = 'SimpleUploadedFile("sample.txt", b"sample", content_type="text/plain")'
+
 _AUTO_TYPES = {"AutoField", "BigAutoField", "SmallAutoField"}
 _RELATION_TYPES = {"ForeignKey", "OneToOneField"}
 
@@ -66,6 +73,15 @@ for model in apps.get_models():
             internal_type = f.get_internal_type()
         except NotImplementedError:
             continue
+        if internal_type == "CharField":
+            # Django reports EmailField and URLField as "CharField" at the database level.
+            class_names = [c.__name__ for c in type(f).__mro__]
+            for special in ("EmailField", "URLField"):
+                if special in class_names:
+                    internal_type = special
+                    break
+        if internal_type == "FileField" and "ImageField" in [c.__name__ for c in type(f).__mro__]:
+            internal_type = "ImageField"
         related = None
         if f.is_relation and f.related_model is not None:
             related = f.related_model._meta.label
@@ -74,9 +90,11 @@ for model in apps.get_models():
             "type": internal_type,
             "related": related,
             "null": bool(f.null),
+            "blank": bool(f.blank),
             "has_default": bool(f.has_default()),
             "empty_strings_allowed": bool(f.empty_strings_allowed),
             "auto_created": bool(f.auto_created),
+            "primary_key": bool(getattr(f, "primary_key", False)),
             "auto_now": bool(getattr(f, "auto_now", False) or getattr(f, "auto_now_add", False)),
             "max_digits": getattr(f, "max_digits", None),
             "decimal_places": getattr(f, "decimal_places", None),
@@ -90,12 +108,22 @@ for model in apps.get_models():
         "proxy": bool(meta.proxy),
         "fields": fields,
     })
-print(json.dumps({"use_tz": bool(settings.USE_TZ), "models": models}))
+auth_user_model = username_field = None
+try:
+    from django.contrib.auth import get_user_model
+    user_model = get_user_model()
+    auth_user_model, username_field = user_model._meta.label, user_model.USERNAME_FIELD
+except Exception:
+    pass   # django.contrib.auth is not installed
+print(json.dumps({
+    "use_tz": bool(settings.USE_TZ), "models": models,
+    "auth_user_model": auth_user_model, "username_field": username_field,
+}))
 """
 
 
 def _introspect_project(python_exe: str, root_dir: Path, settings_module: str) -> dict:
-    """Return {"use_tz": bool, "models": [model_info, ...]} for every installed model."""
+    """Return {"use_tz", "models", "auth_user_model", "username_field"} for the whole project."""
     script = (
         _INTROSPECT_SCRIPT
         .replace("__ROOT_DIR__", repr(str(root_dir)))
@@ -141,6 +169,8 @@ class _Plan:
         self.relation_vars: dict[str, str] = {}   # FK field name -> variable holding the related object
         self.uses: set[str] = set()               # labels of related models created in setup_lines
         self.imports: set[str] = set()            # stdlib modules the sample values need
+        self.needs_files = False                  # the objects include an uploaded file
+        self.needs_png = False                    # ... and that file is the tiny PNG
 
     @property
     def ok(self) -> bool:
@@ -150,9 +180,12 @@ class _Plan:
 class _Planner:
     """Builds a _Plan for a model, creating related objects recursively."""
 
-    def __init__(self, models_by_label: dict[str, dict], use_tz: bool) -> None:
+    def __init__(self, models_by_label: dict[str, dict], use_tz: bool, fill_files: bool = False) -> None:
         self.models = models_by_label
         self.use_tz = use_tz
+        # Unit tests leave file fields empty. Integration and system tests fill the
+        # required ones with a small upload, because a page may print image.url.
+        self.fill_files = fill_files
 
     def plan(self, label: str) -> _Plan:
         plan = _Plan()
@@ -198,6 +231,12 @@ class _Planner:
                 args.append((field["name"], expr))
                 continue
 
+            if field_type in ("FileField", "ImageField") and self.fill_files and not field["blank"]:
+                args.append((field["name"], _IMAGE_UPLOAD if field_type == "ImageField" else _FILE_UPLOAD))
+                plan.needs_files = True
+                plan.needs_png = plan.needs_png or field_type == "ImageField"
+                continue
+
             # FileField, ImageField and other types we cannot fill: fine when the
             # column accepts an empty value, fatal when it does not.
             required = not field["null"] and not field["has_default"] and not field["empty_strings_allowed"]
@@ -224,6 +263,27 @@ class _Planner:
         plan.uses.add(related)
         state["created"][related] = variable
         return variable
+
+
+def media_support(needs_files: bool, needs_png: bool):
+    """What a generated test file needs when its objects or forms upload files.
+
+    Returns (stdlib imports, django import lines, module constants, class decorator, setUpClass block).
+    Uploads go to a temporary folder, never into the project's own media folder.
+    """
+    if not needs_files:
+        return set(), [], [], "", ""
+    stdlib = {"tempfile"} | ({"base64"} if needs_png else set())
+    django_lines = ["from django.core.files.uploadedfile import SimpleUploadedFile"]
+    constants = []
+    if needs_png:
+        constants.append(f'TINY_PNG = base64.b64decode("{TINY_PNG_B64}")')
+    constants += ["# Uploads go to a temporary folder, never into the project's own media folder.",
+                  "_MEDIA = tempfile.TemporaryDirectory()"]
+    decorator = "@override_settings(MEDIA_ROOT=_MEDIA.name)\n"
+    cleanup = ("    @classmethod\n    def setUpClass(cls):\n        super().setUpClass()\n"
+               "        cls.addClassCleanup(_MEDIA.cleanup)\n\n")
+    return stdlib, django_lines, constants, decorator, cleanup
 
 
 def _build_spec(app: str, model_info: dict, plan: _Plan) -> TestSpec:
