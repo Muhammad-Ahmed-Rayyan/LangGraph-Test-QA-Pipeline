@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 class SetupError(TypedDict):
@@ -35,6 +35,10 @@ class TestSpec(TypedDict):
     test_type: Literal["unit", "integration", "system"]
     target: str
     cases: list[TestCaseSpec]
+    # Set when the generator could not build a valid object for this model
+    # (for example a required field of an unsupported type). The model gets no
+    # test class, and the reason is recorded here instead of guessing.
+    skipped_reason: NotRequired[str]
 
 
 TestSpec.__test__ = False
@@ -73,11 +77,26 @@ class AgentState(TypedDict, total=False):
 
     runnable: bool
     setup_errors: list[SetupError]
-    status: Literal["pending", "blocked", "ready_for_test_generation"]
+    # pending / blocked / ready_for_test_generation: set by the runnability check.
+    # completed, environment_error, needs_human_review: final values set by the
+    # finalize node when the run ends (see graph.py).
+    #   completed           every test passed
+    #   environment_error   the test run itself crashed; a person must look, because
+    #                       it is an environment problem the Developer agent cannot fix
+    #   needs_human_review  tests still failed (or the project still would not boot)
+    #                       after MAX_RETRIES loops back to the Developer agent
+    status: Literal[
+        "pending", "blocked", "ready_for_test_generation",
+        "completed", "environment_error", "needs_human_review",
+    ]
 
     test_specs: list[TestSpec]
     test_files: dict[str, str]
 
-    test_results: TestResults
+    test_results: TestResults | None   # None after a loop back to the Developer agent, until the next run
 
     report_json: dict
+
+    # How many times the run has looped back to the Developer agent. The first
+    # run is attempt 1 (retry_count 0); the report records it as "attempt".
+    retry_count: int
