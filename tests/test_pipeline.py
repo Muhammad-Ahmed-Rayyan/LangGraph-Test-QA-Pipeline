@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import graph as graph_module
+import nodes.developer_stub as developer_module
 import nodes.report as report_module
 import nodes.test_execution as execution_module
 import nodes.integration_generation as integration_module
@@ -163,8 +166,9 @@ def test_execution_writes_sqlite_override_and_runs_only_generated_modules(tmp_pa
     assert "'NAME': ':memory:'" in test_settings.read_text(encoding="utf-8")
 
 
-def _run_fixture(zip_name: str) -> dict:
-    graph = build_graph()
+def _run_fixture(zip_name: str, **options) -> dict:
+    """Run the whole pipeline on a fixture. Pass max_retries=0 to look at a single pass."""
+    graph = build_graph(**options)
     return graph.invoke({"zip_path": str(REPO_ROOT / "fixtures" / zip_name)})
 
 
@@ -189,7 +193,7 @@ def test_runnable_fixture_passes_and_writes_report():
 
 @pytest.mark.slow
 def test_non_runnable_fixture_is_blocked_and_reported():
-    result = _run_fixture("non_runnable_example.zip")
+    result = _run_fixture("non_runnable_example.zip", max_retries=0)
 
     assert result["report_json"]["outcome"] == "blocked"
     assert result["setup_errors"][0]["stage"] == "django_check"
@@ -199,7 +203,7 @@ def test_non_runnable_fixture_is_blocked_and_reported():
 
 @pytest.mark.slow
 def test_buggy_fixture_reports_only_the_corrupted_price():
-    result = _run_fixture("buggy_example.zip")
+    result = _run_fixture("buggy_example.zip", max_retries=0)
 
     assert result["report_json"]["outcome"] == "tests_failed"
     faults = result["report_json"]["faults"]
@@ -596,7 +600,7 @@ def test_system_node_leaves_state_alone_when_the_project_is_not_ready():
 
 @pytest.mark.slow
 def test_seeded_flow_bug_is_caught_by_a_system_test_only():
-    result = _run_fixture("buggy_flow_example.zip")
+    result = _run_fixture("buggy_flow_example.zip", max_retries=0)
 
     assert result["report_json"]["outcome"] == "tests_failed"
     faults = result["report_json"]["faults"]
@@ -616,3 +620,247 @@ def test_field_types_fixture_system_flows_cover_forms_choices_edit_and_delete():
     for flow in ("book_create_flow_creates_object", "book_edit_flow_updates_object",
                  "author_create_flow_creates_object", "book_delete_flow_deletes_object"):
         assert f"test_library_{flow}" in names
+
+
+# --- loop back to the Developer agent (D4) -----------------------------------
+
+
+@pytest.mark.parametrize("outcome, retry_count, expected", [
+    ("tests_passed", 0, "finalize"),
+    ("execution_failed", 0, "finalize"),            # an environment problem, not code the Developer agent can fix
+    ("tests_failed", 0, "developer_feedback"),
+    ("tests_failed", 2, "developer_feedback"),
+    ("tests_failed", 3, "finalize"),                # retries used up
+    ("blocked", 0, "developer_feedback"),
+    ("blocked", 2, "developer_feedback"),
+    ("blocked", 3, "finalize"),
+])
+def test_report_router_loops_back_only_while_retries_remain(outcome, retry_count, expected):
+    state = {"report_json": {"outcome": outcome}, "retry_count": retry_count}
+    assert graph_module.route_after_report(state) == expected
+
+
+def test_max_retries_is_three_and_can_be_turned_off():
+    assert graph_module.MAX_RETRIES == 3
+    state = {"report_json": {"outcome": "tests_failed"}, "retry_count": 0}
+    assert graph_module.route_after_report(state, max_retries=0) == "finalize"
+
+
+def test_loop_re_enters_at_the_stage_that_failed():
+    assert graph_module.route_after_developer({"report_json": {"outcome": "blocked"}}) == "runnability_check"
+    assert graph_module.route_after_developer({"report_json": {"outcome": "tests_failed"}}) == "test_generation"
+
+
+@pytest.mark.parametrize("outcome, status", [
+    ("tests_passed", "completed"),
+    ("execution_failed", "environment_error"),
+    ("tests_failed", "needs_human_review"),
+    ("blocked", "needs_human_review"),
+])
+def test_finalize_sets_the_final_status(outcome, status):
+    assert graph_module.finalize_node({"report_json": {"outcome": outcome}})["status"] == status
+
+
+def test_developer_stub_counts_the_retry_writes_the_request_and_leaves_code_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(developer_module, "REPORTS_DIR", tmp_path / "reports")
+    project = tmp_path / "my_project"
+    project.mkdir()
+    (project / "models.py").write_text("x = 1")
+    report = {"outcome": "tests_failed", "attempt": 1, "faults": [{"id": "F1"}]}
+    state = {
+        "project": {"root_dir": str(project)}, "report_json": report, "retry_count": 1,
+        "test_results": {"total": 1}, "test_specs": [{"app": "a"}], "test_files": {"a/tests_generated.py": "x"},
+    }
+
+    result = developer_module.developer_feedback_node(state)
+
+    assert result["retry_count"] == 2
+    assert result["report_json"] == report                       # the router still needs this outcome
+    assert (result["test_results"], result["test_specs"], result["test_files"]) == (None, [], {})   # a retry starts clean
+    assert json.loads((tmp_path / "reports" / "my_project_developer_request.json").read_text()) == report
+    assert (project / "models.py").read_text() == "x = 1"        # the stub never changes code
+
+
+def test_demo_fixer_undoes_the_seeded_bugs_and_leaves_clean_code_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(developer_module, "REPORTS_DIR", tmp_path / "reports")
+    project = tmp_path / "proj"
+    (project / "crud_app").mkdir(parents=True)
+    models = project / "crud_app" / "models.py"
+    views = project / "crud_app" / "views.py"
+    models.write_text("class Product:\n    price = 1\n\n    def save(self, *args, **kwargs):\n"
+                      "        self.price = self.price * 2\n        super().save(*args, **kwargs)")
+    views.write_text("    form.save(commit=False)   # seeded bug\n    return redirect('home')\n")
+    state = {"project": {"root_dir": str(project)}, "report_json": {"outcome": "tests_failed"}}
+
+    result = developer_module.demo_fixer_node(state)
+
+    assert "def save" not in models.read_text()
+    assert views.read_text() == "    form.save()\n    return redirect('home')\n"
+    assert result["retry_count"] == 1
+
+    before = (models.read_text(), views.read_text())
+    developer_module.demo_fixer_node(state)                       # nothing left to repair
+    assert (models.read_text(), views.read_text()) == before
+
+
+def _stub_pipeline(monkeypatch, tmp_path, outcome_for_attempt):
+    """Replace every node with a counting stub so the loop can be tested in milliseconds."""
+    calls = {"runnability": 0, "generation": 0, "report": 0}
+    monkeypatch.setattr(developer_module, "REPORTS_DIR", tmp_path / "reports")
+    project = tmp_path / "proj"
+    project.mkdir(exist_ok=True)
+
+    def ingestion(state):
+        return {**state, "project": {"root_dir": str(project), "django_apps": []}}
+
+    def runnability(state):
+        calls["runnability"] += 1
+        outcome = outcome_for_attempt(state.get("retry_count", 0))
+        blocked = outcome == "blocked"
+        return {**state, "runnable": not blocked, "setup_errors": [],
+                "status": "blocked" if blocked else "ready_for_test_generation"}
+
+    def generation(state):
+        calls["generation"] += 1
+        spec = {"app": "a", "test_type": "unit", "target": "T", "cases": []}
+        return {**state, "test_specs": list(state.get("test_specs", [])) + [spec]}
+
+    def report(state):
+        calls["report"] += 1
+        attempt = state.get("retry_count", 0) + 1
+        return {**state, "report_json": {"outcome": outcome_for_attempt(attempt - 1), "attempt": attempt}}
+
+    monkeypatch.setattr(graph_module, "ingestion_node", ingestion)
+    monkeypatch.setattr(graph_module, "runnability_check_node", runnability)
+    monkeypatch.setattr(graph_module, "test_generation_node", generation)
+    monkeypatch.setattr(graph_module, "integration_generation_node", lambda s: s)
+    monkeypatch.setattr(graph_module, "system_generation_node", lambda s: s)
+    monkeypatch.setattr(graph_module, "test_execution_node", lambda s: s)
+    monkeypatch.setattr(graph_module, "report_node", report)
+    return calls
+
+
+def test_failing_tests_stop_after_three_retries_with_needs_human_review(monkeypatch, tmp_path):
+    calls = _stub_pipeline(monkeypatch, tmp_path, lambda retry_count: "tests_failed")
+
+    result = build_graph().invoke({})
+
+    assert result["status"] == "needs_human_review"
+    assert result["retry_count"] == 3
+    assert calls["report"] == 4                                   # the first run plus 3 retries, then it stops
+    assert result["report_json"]["attempt"] == 4
+    assert calls["runnability"] == 1                              # tests_failed re-enters at test_generation, not setup
+    assert len(result["test_specs"]) == 1                         # each retry starts from empty specs, not appended ones
+    assert (tmp_path / "reports" / "proj_developer_request.json").exists()
+
+
+def test_a_project_that_never_boots_also_stops_after_three_retries(monkeypatch, tmp_path):
+    calls = _stub_pipeline(monkeypatch, tmp_path, lambda retry_count: "blocked")
+
+    result = build_graph().invoke({})
+
+    assert result["status"] == "needs_human_review"
+    assert result["retry_count"] == 3
+    assert calls["runnability"] == 4                              # blocked re-enters at runnability_check
+    assert calls["generation"] == 0
+
+
+def test_loop_ends_as_completed_once_a_retry_passes(monkeypatch, tmp_path):
+    calls = _stub_pipeline(monkeypatch, tmp_path, lambda retry_count: "tests_failed" if retry_count == 0 else "tests_passed")
+
+    result = build_graph().invoke({})
+
+    assert result["status"] == "completed"
+    assert (result["retry_count"], result["report_json"]["attempt"], calls["report"]) == (1, 2, 2)
+
+
+def test_environment_failure_ends_the_run_without_a_retry(monkeypatch, tmp_path):
+    calls = _stub_pipeline(monkeypatch, tmp_path, lambda retry_count: "execution_failed")
+
+    result = build_graph().invoke({})
+
+    assert result["status"] == "environment_error"
+    assert (result.get("retry_count", 0), calls["report"]) == (0, 1)
+
+
+def test_report_records_the_attempt_number(tmp_path):
+    project = tmp_path / "attempt_probe_project"
+    project.mkdir()
+    state = {"project": {"root_dir": str(project), "django_apps": []}, "status": "ready_for_test_generation",
+             "runnable": True, "setup_errors": [], "retry_count": 2}
+    report_path = REPO_ROOT / "reports" / "attempt_probe_project_report.json"
+    try:
+        result = report_module.report_node(state)
+    finally:
+        report_path.unlink(missing_ok=True)
+
+    assert result["report_json"]["attempt"] == 3
+
+
+@pytest.mark.slow
+def test_buggy_fixture_without_a_fixer_stops_after_three_retries():
+    result = _run_fixture("buggy_example.zip")
+
+    assert result["status"] == "needs_human_review"
+    assert result["retry_count"] == 3
+    assert (result["report_json"]["outcome"], result["report_json"]["attempt"]) == ("tests_failed", 4)
+    request = json.loads((REPO_ROOT / "reports" / "Django-crud_private-main_developer_request.json").read_text())
+    assert request["outcome"] == "tests_failed" and request["attempt"] == 3
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("fixture", ["buggy_example.zip", "buggy_flow_example.zip"])
+def test_demo_fixer_takes_a_failing_fixture_from_tests_failed_to_tests_passed(fixture):
+    result = _run_fixture(fixture, demo_fix=True)
+
+    assert result["status"] == "completed"
+    assert (result["retry_count"], result["report_json"]["attempt"]) == (1, 2)
+    assert result["report_json"]["outcome"] == "tests_passed"
+
+
+# --- documentation stays in step with the code (D5) --------------------------
+
+
+def _mermaid_block(relative_path: str) -> str:
+    text = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+    blocks = re.findall(r"```mermaid\n(.*?)```", text, flags=re.S)
+    assert len(blocks) == 1, f"{relative_path} should hold exactly one mermaid diagram"
+    return blocks[0]
+
+
+def _diagram_edges(block: str) -> set[tuple[str, str]]:
+    names = {"START": "__start__", "END": "__end__"}
+    edges = set()
+    for line in block.splitlines():
+        match = re.match(r"^\s*(\w+)\s*-->(?:\|[^|]*\|)?\s*(\w+)\s*$", line)
+        if match:
+            edges.add(tuple(names.get(name, name) for name in match.groups()))
+    return edges
+
+
+def test_readme_and_architecture_diagrams_match_the_compiled_graph():
+    compiled = {(edge.source, edge.target) for edge in build_graph().get_graph().edges}
+
+    assert _diagram_edges(_mermaid_block("README.md")) == compiled
+    assert _diagram_edges(_mermaid_block("docs/architecture.md")) == compiled
+
+
+def test_readme_and_architecture_show_the_same_diagram():
+    assert _mermaid_block("README.md") == _mermaid_block("docs/architecture.md")
+
+
+def test_architecture_document_describes_every_node():
+    text = (REPO_ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+    nodes = [name for name in build_graph().get_graph().nodes if not name.startswith("__")]
+
+    missing = [name for name in nodes if f"`{name}`" not in text]
+    assert not missing
+
+
+def test_report_example_documents_the_attempt_and_every_outcome():
+    example = json.loads((REPO_ROOT / "docs" / "report_example.json").read_text(encoding="utf-8"))
+
+    assert set(example["examples"]) == set(example["outcome_values"])
+    for outcome, report in example["examples"].items():
+        assert report["outcome"] == outcome
+        assert isinstance(report["attempt"], int) and report["attempt"] >= 1

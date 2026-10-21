@@ -147,6 +147,7 @@ def report_node(state: AgentState) -> AgentState:
     report = {
         "schema_version": "1.0",
         "outcome": outcome,
+        "attempt": int(state.get("retry_count", 0)) + 1,
         "project": {
             "name": project_name,
             "framework": "django",
