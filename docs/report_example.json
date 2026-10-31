@@ -1,16 +1,22 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "description": "Contract between the Testing/QA agent and the Software Development agent. The report node writes one object shaped like the examples below. 'outcome' tells the Developer agent which kind of problem it has.",
   "attempt": "1 for the first run. Each time the pipeline loops back to the Developer agent the report is written again with attempt + 1, up to 1 + 3 attempts. If the same outcome comes back after the last retry, the run ends with status needs_human_review.",
   "outcome_values": {
     "blocked": "Project could not install or boot. No tests were written or run. Fix setup_errors.",
     "execution_failed": "Tests were written but the test run itself crashed (e.g. database unreachable). Not a code fault in the tests.",
     "tests_failed": "Tests ran and some failed. Fix the code behind each entry in faults.",
-    "tests_passed": "Tests ran and all passed. Nothing to fix."
+    "tests_passed": "Tests ran and all passed. Nothing to fix. Read skipped_tests: a skipped test did not check anything."
+  },
+  "field_notes": {
+    "summary.skipped": "Tests that chose not to run, for example a form flow whose generated data the form rejected. They count in total, never in passed, and are never faults.",
+    "skipped_tests": "One entry per skipped test with the reason it gave. Empty when nothing was skipped.",
+    "faults[].confidence": "high: an assertion failed, or the error passed through the project's own code. low: the error was raised while the generated test was building its own objects with no frame in the project's code, or the generated test module failed to load. A low-confidence fault is kept because it can still be real, but check the test setup before changing project code.",
+    "faults[].confidence_note": "Why the confidence is low. Empty when confidence is high."
   },
   "examples": {
     "blocked": {
-      "schema_version": "1.0",
+      "schema_version": "1.1",
       "outcome": "blocked",
       "attempt": 1,
       "project": {"name": "Django-crud_private-main", "framework": "django", "apps": ["crud_app"], "has_docs": true},
@@ -26,11 +32,12 @@
         ]
       },
       "execution_error": null,
-      "summary": {"total": 0, "passed": 0, "failed": 0, "errored": 0, "by_type": {"unit": 0, "integration": 0, "system": 0}},
-      "faults": []
+      "summary": {"total": 0, "passed": 0, "failed": 0, "errored": 0, "skipped": 0, "by_type": {"unit": 0, "integration": 0, "system": 0}},
+      "faults": [],
+      "skipped_tests": []
     },
     "execution_failed": {
-      "schema_version": "1.0",
+      "schema_version": "1.1",
       "outcome": "execution_failed",
       "attempt": 1,
       "project": {"name": "Django-crud_private-main", "framework": "django", "apps": ["crud_app"], "has_docs": true},
@@ -40,17 +47,18 @@
         "error_summary": "django.db.utils.OperationalError: connection to server failed",
         "raw_output": "...last lines of the real output..."
       },
-      "summary": {"total": 0, "passed": 0, "failed": 0, "errored": 0, "by_type": {"unit": 0, "integration": 0, "system": 0}},
-      "faults": []
+      "summary": {"total": 0, "passed": 0, "failed": 0, "errored": 0, "skipped": 0, "by_type": {"unit": 0, "integration": 0, "system": 0}},
+      "faults": [],
+      "skipped_tests": []
     },
     "tests_failed": {
-      "schema_version": "1.0",
+      "schema_version": "1.1",
       "outcome": "tests_failed",
       "attempt": 2,
       "project": {"name": "Django-crud_private-main", "framework": "django", "apps": ["crud_app"], "has_docs": true},
       "setup": {"runnable": true, "errors": []},
       "execution_error": null,
-      "summary": {"total": 17, "passed": 16, "failed": 1, "errored": 0, "by_type": {"unit": 3, "integration": 8, "system": 6}},
+      "summary": {"total": 17, "passed": 16, "failed": 1, "errored": 0, "skipped": 0, "by_type": {"unit": 3, "integration": 8, "system": 6}},
       "faults": [
         {
           "id": "F1",
@@ -60,19 +68,29 @@
           "category": "assertion_error",
           "message": "AssertionError: 2 != 1",
           "traceback": "...full traceback...",
-          "suspected_location": "crud_app/models.py"
+          "suspected_location": "crud_app/models.py",
+          "confidence": "high",
+          "confidence_note": ""
         }
-      ]
+      ],
+      "skipped_tests": []
     },
     "tests_passed": {
-      "schema_version": "1.0",
+      "schema_version": "1.1",
       "outcome": "tests_passed",
       "attempt": 2,
       "project": {"name": "Django-crud_private-main", "framework": "django", "apps": ["crud_app"], "has_docs": true},
       "setup": {"runnable": true, "errors": []},
       "execution_error": null,
-      "summary": {"total": 17, "passed": 17, "failed": 0, "errored": 0, "by_type": {"unit": 3, "integration": 8, "system": 6}},
-      "faults": []
+      "summary": {"total": 17, "passed": 16, "failed": 0, "errored": 0, "skipped": 1, "by_type": {"unit": 3, "integration": 8, "system": 6}},
+      "faults": [],
+      "skipped_tests": [
+        {
+          "name": "crud_app.tests_system_generated.CrudAppSystemTests.test_create_flow_creates_object",
+          "test_type": "system",
+          "reason": "The form rejected the generated data, so this flow was not tested: ..."
+        }
+      ]
     }
   }
 }

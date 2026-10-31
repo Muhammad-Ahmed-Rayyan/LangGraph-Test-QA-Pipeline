@@ -1,0 +1,10 @@
+Found 2 test(s).
+Creating test database for alias 'default' ('file:memorydb_default?mode=memory&cache=shared')...
+test_rejected_data_is_skipped (users.tests_flow.FlowTests.test_rejected_data_is_skipped) ... skipped 'The form rejected the generated data, so this flow was not tested: * username\n  * Enter a valid username.\n* password2\n  * The password is too similar to the email address.'
+test_valid_data_saves_user (users.tests_flow.FlowTests.test_valid_data_saves_user) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.558s
+
+OK (skipped=1)
+Destroying test database for alias 'default' ('file:memorydb_default?mode=memory&cache=shared')...

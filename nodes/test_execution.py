@@ -12,12 +12,14 @@ OUTPUT_LIMIT = 3000
 
 _TEST_RESULT_RE = re.compile(
     r"^(?P<name>.+?)\s+\((?P<qualname>.+?)\)\s+\.\.\.\s+"
-    r"(?P<status>ok|FAIL|ERROR)$",
+    r"(?P<status>ok|FAIL|ERROR|skipped\b.*)$",
     re.IGNORECASE,
 )
 _FAILURE_HEADER_RE = re.compile(
     r"^(?:FAIL|ERROR):\s+.+?\s+\((?P<qualname>[^()]+)\)\s*$"
 )
+# The last line Django prints: "OK", "OK (skipped=1)" or "FAILED (failures=1, errors=2, skipped=1)".
+_FINAL_LINE_RE = re.compile(r"^(?:OK|FAILED)\s*\(([^)]*)\)\s*$", re.MULTILINE)
 
 
 def _tail(raw_output: str, limit: int = OUTPUT_LIMIT) -> str:
@@ -75,6 +77,12 @@ def _last_exception_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+def _skip_reason(status_text: str) -> str:
+    """The reason Django printed after 'skipped', without quotes or escaped newlines."""
+    reason = status_text[len("skipped"):].strip().strip("'\"")
+    return reason.replace("\\n", " ").replace("  ", " ")
+
+
 def _parse_test_output(raw_output: str) -> list[TestOutcome]:
     tracebacks = _failure_tracebacks(raw_output)
     outcomes: list[TestOutcome] = []
@@ -86,9 +94,17 @@ def _parse_test_output(raw_output: str) -> list[TestOutcome]:
 
         status = match.group("status").lower()
         qualname = match.group("qualname")
-        outcome = "passed" if status == "ok" else ("failed" if status == "fail" else "error")
+        if status.startswith("skipped"):
+            outcome = "skipped"
+        else:
+            outcome = "passed" if status == "ok" else ("failed" if status == "fail" else "error")
         traceback = tracebacks.get(qualname, "")
-        message = _last_exception_line(traceback) if traceback else line.strip()
+        if outcome == "passed":
+            message = ""
+        elif outcome == "skipped":
+            message = _skip_reason(match.group("status"))
+        else:
+            message = _last_exception_line(traceback) if traceback else line.strip()
 
         if outcome == "error" and (
             "_FailedTest" in qualname
@@ -121,33 +137,31 @@ def _parse_test_results(raw_output: str, returncode: int) -> TestResults:
             passed=0,
             failed=0,
             errored=0,
+            skipped=0,
             tests=[],
             raw_output=_tail(output),
         )
 
     tests = _parse_test_output(raw_output)
     total = int(ran_match.group(1))
-    failed = 0
-    errored = 0
 
-    failed_match = re.search(r"\bFAILED\s*\(([^)]*)\)", raw_output, re.IGNORECASE)
-    if failed_match:
-        counts = {
-            key.lower(): int(value)
-            for key, value in re.findall(r"([A-Za-z_]+)\s*=\s*(\d+)", failed_match.group(1))
-        }
-        failed = counts.get("failures", 0)
-        errored = counts.get("errors", 0)
-    else:
-        failed = sum(test["outcome"] == "failed" for test in tests)
-        errored = sum(test["outcome"] == "error" for test in tests)
+    final_line = _FINAL_LINE_RE.search(raw_output)
+    counts = {
+        key.lower(): int(value)
+        for key, value in re.findall(r"([A-Za-z_][A-Za-z_ ]*?)\s*=\s*(\d+)", final_line.group(1))
+    } if final_line else {}
+    failed = counts.get("failures", sum(test["outcome"] == "failed" for test in tests))
+    errored = counts.get("errors", sum(test["outcome"] == "error" for test in tests))
+    skipped = counts.get("skipped", sum(test["outcome"] == "skipped" for test in tests))
 
     return TestResults(
         run_status="ran",
         total=total,
-        passed=max(0, total - failed - errored),
+        # A skipped test did not run its checks, so it is never counted as passed.
+        passed=max(0, total - failed - errored - skipped),
         failed=failed,
         errored=errored,
+        skipped=skipped,
         tests=tests,
         raw_output=_tail(raw_output),
     )
@@ -187,6 +201,7 @@ def _could_not_run(message: str) -> TestResults:
         passed=0,
         failed=0,
         errored=0,
+        skipped=0,
         tests=[],
         raw_output=_tail(message),
     )

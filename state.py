@@ -48,7 +48,7 @@ class TestOutcome(TypedDict):
     """Result of one executed test."""
     name: str
     test_type: str
-    outcome: Literal["passed", "failed", "error"]
+    outcome: Literal["passed", "failed", "error", "skipped"]
     message: str
     traceback: str
 
@@ -63,7 +63,7 @@ class TestResults(TypedDict):
     passed: int
     failed: int
     errored: int
-    tests: list[TestOutcome]
+    skipped: int   # tests that chose not to run; counted in total, never in passed    tests: list[TestOutcome]
     raw_output: str
 
 

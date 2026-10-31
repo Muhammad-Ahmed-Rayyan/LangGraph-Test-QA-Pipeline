@@ -520,7 +520,7 @@ def test_marker_goes_on_a_text_field_the_page_prints_and_not_on_one_it_does_not(
     variable, marker = setup.ensure("shop.Product", displayed={"price", "name"})
 
     assert variable == "rel_shop_product"
-    assert marker[0] == "name" and "name='System test product name'" in setup.lines[0].replace('"', "'")
+    assert marker == ("name", "System_test_product_name") and "name='System_test_product_name'" in setup.lines[0].replace('"', "'")
     other = system_module._Setup(generation_module._Planner(models, True, fill_files=True))
     assert other.ensure("shop.Product", displayed={"price"})[1] is None   # price is not a text field
 
@@ -864,3 +864,158 @@ def test_report_example_documents_the_attempt_and_every_outcome():
     for outcome, report in example["examples"].items():
         assert report["outcome"] == outcome
         assert isinstance(report["attempt"], int) and report["attempt"] >= 1
+
+# --- skipped tests, passed messages and fault confidence ----------------------
+
+
+def test_parser_counts_a_skipped_test_separately_and_never_as_passed():
+    results = execution_module._parse_test_results(_sample("skipped.txt"), 0)
+
+    assert results["run_status"] == "ran"
+    assert (results["total"], results["passed"], results["failed"], results["errored"], results["skipped"]) == (2, 1, 0, 0, 1)
+    skipped = [test for test in results["tests"] if test["outcome"] == "skipped"]
+    assert len(skipped) == 1
+    assert "rejected the generated data" in skipped[0]["message"]
+    assert "\\n" not in skipped[0]["message"]
+    assert all(test["message"] == "" for test in results["tests"] if test["outcome"] == "passed")
+
+
+def test_parser_reads_skipped_from_the_final_line_next_to_failures():
+    output = (
+        "test_a (app.tests_generated.AppTests.test_a) ... ok\n"
+        "test_b (app.tests_generated.AppTests.test_b) ... skipped 'not now'\n"
+        "test_c (app.tests_generated.AppTests.test_c) ... FAIL\n\n"
+        "======================================================================\n"
+        "FAIL: test_c (app.tests_generated.AppTests.test_c)\n"
+        "----------------------------------------------------------------------\n"
+        "Traceback (most recent call last):\n  File \"x.py\", line 1, in test_c\nAssertionError: 2 != 1\n\n"
+        "----------------------------------------------------------------------\n"
+        "Ran 3 tests in 0.1s\n\nFAILED (failures=1, skipped=1)\n"
+    )
+
+    results = execution_module._parse_test_results(output, 1)
+
+    assert (results["total"], results["passed"], results["failed"], results["errored"], results["skipped"]) == (3, 1, 1, 0, 1)
+    assert [test["outcome"] for test in results["tests"]] == ["passed", "skipped", "failed"]
+
+
+def _state_for(tmp_path, monkeypatch, tests, **counts):
+    repo = tmp_path / "repo"
+    (repo / "nodes").mkdir(parents=True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setattr(report_module, "__file__", str(repo / "nodes" / "report.py"))
+    results = {"run_status": "ran", "total": len(tests), "passed": 0, "failed": 0, "errored": 0, "skipped": 0,
+               "tests": tests, "raw_output": ""}
+    results.update(counts)
+    state = {"status": "ready_for_test_generation", "runnable": True, "project": {"root_dir": str(project), "django_apps": ["app"]},
+             "test_results": results}
+    return state, project
+
+
+def test_skipped_tests_are_listed_but_are_never_faults(tmp_path, monkeypatch):
+    tests = [
+        {"name": "app.tests_system_generated.S.test_flow", "test_type": "system", "outcome": "skipped",
+         "message": "The form rejected the generated data", "traceback": ""},
+        {"name": "app.tests_generated.M.test_ok", "test_type": "unit", "outcome": "passed", "message": "", "traceback": ""},
+    ]
+    state, _ = _state_for(tmp_path, monkeypatch, tests, passed=1, skipped=1)
+
+    report = report_module.report_node(state)["report_json"]
+
+    assert report["outcome"] == "tests_passed"
+    assert report["faults"] == []
+    assert report["summary"]["skipped"] == 1 and report["summary"]["passed"] == 1
+    assert report["skipped_tests"] == [{"name": "app.tests_system_generated.S.test_flow", "test_type": "system",
+                                        "reason": "The form rejected the generated data"}]
+
+
+def _traceback(root: Path, venv: Path, generated_code: str, error: str) -> str:
+    return (
+        "Traceback (most recent call last):\n"
+        f'  File "{root / "app" / "tests_generated.py"}", line 14, in test_user\n    {generated_code}\n'
+        f'  File "{venv / "Lib" / "site-packages" / "django" / "db" / "models" / "query.py"}", line 665, in create\n'
+        "    obj.save(force_insert=True, using=self.db)\n"
+        f"{error}"
+    )
+
+
+def test_error_raised_while_the_test_builds_its_own_objects_is_flagged_low_confidence_but_kept(tmp_path, monkeypatch):
+    state, project = _state_for(tmp_path, monkeypatch, [], failed=0, errored=1, total=1)
+    venv = tmp_path / "_venv_proj"
+    state["test_results"]["tests"] = [{
+        "name": "app.tests_generated.ProfileModelTests.test_user_relation_round_trips", "test_type": "unit",
+        "outcome": "error", "message": "django.db.utils.IntegrityError: UNIQUE constraint failed: app_profile.user_id",
+        "traceback": _traceback(project, venv, "obj = Profile.objects.create(user=rel_auth_user)",
+                                "django.db.utils.IntegrityError: UNIQUE constraint failed: app_profile.user_id"),
+    }]
+
+    report = report_module.report_node(state)["report_json"]
+
+    assert report["outcome"] == "tests_failed"
+    fault = report["faults"][0]                               # kept: it may still be a real fault
+    assert fault["confidence"] == "low"
+    assert "test setup" in fault["confidence_note"]
+
+
+def test_assertion_failures_and_errors_inside_project_code_stay_high_confidence(tmp_path, monkeypatch):
+    state, project = _state_for(tmp_path, monkeypatch, [], failed=1, errored=1, total=2)
+    venv = tmp_path / "_venv_proj"
+    assertion = {
+        "name": "app.tests_generated.M.test_price_round_trips", "test_type": "unit", "outcome": "failed",
+        "message": "AssertionError: 2 != 1",
+        "traceback": _traceback(project, venv, "self.assertEqual(obj.price, 1)", "AssertionError: 2 != 1"),
+    }
+    in_project = {
+        "name": "app.tests_generated.M.test_save", "test_type": "unit", "outcome": "error",
+        "message": "ValueError: boom",
+        "traceback": (
+            "Traceback (most recent call last):\n"
+            f'  File "{project / "app" / "tests_generated.py"}", line 9, in test_save\n    obj = M.objects.create(a=1)\n'
+            f'  File "{project / "app" / "models.py"}", line 7, in save\n    raise ValueError("boom")\nValueError: boom'
+        ),
+    }
+    state["test_results"]["tests"] = [assertion, in_project]
+
+    faults = report_module.report_node(state)["report_json"]["faults"]
+
+    assert [f["confidence"] for f in faults] == ["high", "high"]
+    assert faults[1]["suspected_location"] == "app/models.py"
+
+
+def test_a_generated_module_that_fails_to_load_is_flagged_low_confidence(tmp_path, monkeypatch):
+    state, _ = _state_for(tmp_path, monkeypatch, [], failed=0, errored=1, total=1)
+    state["test_results"]["tests"] = [{
+        "name": "unittest.loader._FailedTest.app.tests_generated", "test_type": "unit", "outcome": "error",
+        "message": "Generated test module failed to load: ImportError: cannot import name 'X'", "traceback": "ImportError: cannot import name 'X'",
+    }]
+
+    fault = report_module.report_node(state)["report_json"]["faults"][0]
+
+    assert fault["confidence"] == "low"
+    assert "failed to load" in fault["confidence_note"]
+
+
+def test_report_example_documents_skipped_tests_and_fault_confidence():
+    example = json.loads((REPO_ROOT / "docs" / "report_example.json").read_text(encoding="utf-8"))
+
+    for report in example["examples"].values():
+        assert "skipped" in report["summary"]
+        assert isinstance(report["skipped_tests"], list)
+        for fault in report["faults"]:
+            assert fault["confidence"] in ("high", "low") and "confidence_note" in fault
+
+
+@pytest.mark.slow
+def test_unseen_blog_fixture_reports_no_false_faults():
+    """Regression: this project once produced two false faults (a signal clash and invalid form data)."""
+    result = _run_fixture("unseen_example.zip", max_retries=0)
+
+    report = result["report_json"]
+    assert report["outcome"] == "tests_passed"
+    assert report["faults"] == []
+    assert report["project"]["apps"] == ["blog", "users"]
+    assert (report["summary"]["total"], report["summary"]["passed"], report["summary"]["skipped"]) == (24, 24, 0)
+    names = [test["name"] for test in result["test_results"]["tests"]]
+    assert any(name.endswith("ProfileModelTests.test_user_relation_round_trips") for name in names)
+    assert any(name.endswith("test_register_flow_creates_object") for name in names)

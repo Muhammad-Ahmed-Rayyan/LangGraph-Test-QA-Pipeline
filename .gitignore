@@ -28,4 +28,5 @@ reports/
 .DS_Store
 Thumbs.db
 .vscode/
-.idea/
+.idea/*_out.txt
+*_out.txt

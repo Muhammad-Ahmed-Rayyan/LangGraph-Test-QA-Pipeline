@@ -7,6 +7,10 @@ from pathlib import Path
 from state import AgentState
 
 _TRACEBACK_FRAME_RE = re.compile(r'^\s*File ["\'](?P<path>.+?)["\'], line \d+', re.MULTILINE)
+# A frame plus the source line Python prints under it.
+_TRACEBACK_CODE_FRAME_RE = re.compile(
+    r'^\s*File ["\'](?P<path>.+?)["\'], line \d+, in [^\n]*\n(?P<code>[^\n]*)', re.MULTILINE
+)
 _GENERATED_TEST_RE = re.compile(r"(?:^|[/\\])tests(?:_[^/\\]+)?_generated\.py$", re.IGNORECASE)
 
 
@@ -63,6 +67,46 @@ def _project_relative_location(test_outcome: dict, root_dir: Path) -> str:
     return ""
 
 
+def _fault_confidence(test_outcome: dict, root_dir: Path) -> tuple[str, str]:
+    """How sure the report is that a failure is a fault in the project.
+
+    "low" is given only to failures that look like a limit of the generated test:
+    the test module did not load, or an ERROR was raised while the generated test
+    was building its own objects, with no frame in the project's code. Such a
+    failure can still be a real fault (a wrong database constraint, for example),
+    so it is labelled and kept, never dropped.
+    """
+    name = test_outcome.get("name", "")
+    message = test_outcome.get("message", "")
+    if "_FailedTest" in name or message.startswith("Generated test module failed to load"):
+        return "low", "The generated test module failed to load, so this points at the generator more than at the project."
+    if test_outcome.get("outcome") != "error":
+        return "high", ""
+
+    root = root_dir.resolve()
+    project_frame = False
+    last_generated_code = ""
+    for match in _TRACEBACK_CODE_FRAME_RE.finditer(test_outcome.get("traceback", "")):
+        try:
+            relative = Path(match.group("path")).resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if any(part.lower().startswith("_venv_") for part in relative.parts):
+            continue
+        if _GENERATED_TEST_RE.search(relative.as_posix()):
+            last_generated_code = match.group("code").strip()
+        else:
+            project_frame = True
+
+    if not project_frame and ".objects." in last_generated_code:
+        return "low", (
+            "The error was raised while the generated test was creating its own objects, and no frame "
+            "is in the project's code. Check whether the test setup is at fault (a signal or a constraint "
+            "the generator did not account for) before changing project code."
+        )
+    return "high", ""
+
+
 def _report_outcome(status: str | None, test_results: dict | None) -> str:
     if status == "blocked":
         return "blocked"
@@ -109,12 +153,13 @@ def report_node(state: AgentState) -> AgentState:
     passed = int(test_results.get("passed", 0)) if test_results else 0
     failed = int(test_results.get("failed", 0)) if test_results else 0
     errored = int(test_results.get("errored", 0)) if test_results else 0
+    skipped = int(test_results.get("skipped", 0)) if test_results else 0
 
     faults = []
     if outcome == "tests_failed" and test_results:
         fault_number = 0
         for test in test_outcomes:
-            if test.get("outcome") == "passed":
+            if test.get("outcome") in ("passed", "skipped"):
                 continue
             fault_number += 1
             message = test.get("message", "Test failed")
@@ -124,6 +169,7 @@ def report_node(state: AgentState) -> AgentState:
                 and "migration" not in message.lower()
             ):
                 message = f"Database schema is missing, likely because the project has no migrations: {message}"
+            confidence, confidence_note = _fault_confidence(test, project_root)
             faults.append({
                 "id": f"F{fault_number}",
                 "test_name": test.get("name", "unknown"),
@@ -133,7 +179,22 @@ def report_node(state: AgentState) -> AgentState:
                 "message": message,
                 "traceback": traceback,
                 "suspected_location": _project_relative_location(test, project_root),
+                "confidence": confidence,
+                "confidence_note": confidence_note,
             })
+
+    # Tests that chose not to run (for example a form that rejected the generated
+    # data). They are not faults, but they are listed so nobody reads "all passed"
+    # as "everything was checked".
+    skipped_tests = [
+        {
+            "name": test.get("name", "unknown"),
+            "test_type": test.get("test_type", "unit"),
+            "reason": test.get("message", ""),
+        }
+        for test in test_outcomes
+        if test.get("outcome") == "skipped"
+    ]
 
     execution_error = None
     if outcome == "execution_failed" and test_results:
@@ -145,7 +206,7 @@ def report_node(state: AgentState) -> AgentState:
         }
 
     report = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "outcome": outcome,
         "attempt": int(state.get("retry_count", 0)) + 1,
         "project": {
@@ -164,9 +225,11 @@ def report_node(state: AgentState) -> AgentState:
             "passed": passed,
             "failed": failed,
             "errored": errored,
+            "skipped": skipped,
             "by_type": by_type,
         },
         "faults": faults,
+        "skipped_tests": skipped_tests,
     }
 
     repository_root = Path(__file__).resolve().parents[1]
