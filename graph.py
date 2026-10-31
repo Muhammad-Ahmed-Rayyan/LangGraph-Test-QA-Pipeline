@@ -110,23 +110,33 @@ def build_graph(demo_fix: bool = False, max_retries: int = MAX_RETRIES):
 
 
 if __name__ == "__main__":
+    import argparse
     import json
     import sys
 
-    paths = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
-    demo_fix = "--demo-fix" in sys.argv
-    if not paths:
-        sys.exit("usage: python graph.py <project.zip | project folder> [--demo-fix]")
-    input_path = paths[0]
+    parser = argparse.ArgumentParser(
+        description="Run the Testing/QA pipeline on a Django project (a .zip or an extracted folder).")
+    parser.add_argument("input_path", help="path to a project .zip, or to an already extracted project folder")
+    parser.add_argument("--demo-fix", action="store_true",
+                        help="DEMO ONLY: a mock fixer stands in for the Developer agent")
+    parser.add_argument("--max-retries", type=int, default=None, metavar="N",
+                        help="how many times a failing run may loop back to the Developer agent. "
+                             f"Default: 0 for a plain run (no real Developer agent is connected, so a retry "
+                             f"changes nothing), {MAX_RETRIES} with --demo-fix.")
+    args = parser.parse_args()
 
-    if demo_fix:
+    max_retries = args.max_retries if args.max_retries is not None else (MAX_RETRIES if args.demo_fix else 0)
+    if max_retries < 0:
+        parser.error("--max-retries must be 0 or more")
+
+    if args.demo_fix:
         print("[demo-fix] DEMO ONLY: a mock fixer stands in for the Developer agent.", file=sys.stderr)
-    app = build_graph(demo_fix=demo_fix)
+    app = build_graph(demo_fix=args.demo_fix, max_retries=max_retries)
 
-    if input_path.endswith(".zip"):
-        initial_state = {"zip_path": input_path}
+    if args.input_path.endswith(".zip"):
+        initial_state = {"zip_path": args.input_path}
     else:
-        initial_state = {"work_dir": input_path}
+        initial_state = {"work_dir": args.input_path}
 
     result = app.invoke(initial_state)
 

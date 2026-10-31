@@ -159,6 +159,23 @@ def _join_args(args: list[tuple[str, str]]) -> str:
     return ", ".join(f"{name}={expr}" for name, expr in args)
 
 
+def _create_call(model_name: str, model_info: dict, args: list[tuple[str, str]]) -> str:
+    """Python source that creates one instance of a model.
+
+    A model with a OneToOneField is created with update_or_create on that field.
+    A signal (for example post_save on User) often creates the row as soon as the
+    other side exists, and a plain create() would then fail with a UNIQUE
+    constraint error that is the test's fault, not the project's.
+    """
+    one_to_one = {f["name"] for f in model_info["fields"] if f["type"] == "OneToOneField"}
+    keys = [(name, expr) for name, expr in args if name in one_to_one]
+    if not keys:
+        return f"{model_name}.objects.create({_join_args(args)})"
+    rest = [(name, expr) for name, expr in args if name not in one_to_one]
+    defaults = ", ".join(f"{name!r}: {expr}" for name, expr in rest)
+    return f"{model_name}.objects.update_or_create({_join_args(keys)}, defaults={{{defaults}}})[0]"
+
+
 class _Plan:
     """How to build one valid instance of a model, or why that is not possible."""
 
@@ -259,7 +276,7 @@ class _Planner:
         if args is None:
             return None
         variable = _var_name(related)
-        plan.setup_lines.append(f"{variable} = <<{related}>>.objects.create({_join_args(args)})")
+        plan.setup_lines.append(f"{variable} = {_create_call(f'<<{related}>>', self.models[related], args)}")
         plan.uses.add(related)
         state["created"][related] = variable
         return variable
@@ -323,7 +340,7 @@ def _render_test_class(spec: TestSpec, model_info: dict, plan: _Plan) -> str:
     """
     fields = {f["name"]: f for f in model_info["fields"]}
     samples = dict(plan.args)
-    create_args = _join_args(plan.args)
+    create_call = _create_call(spec["target"], model_info, plan.args)
     setup = [f"        {line}" for line in plan.setup_lines]
 
     lines = [
@@ -334,7 +351,7 @@ def _render_test_class(spec: TestSpec, model_info: dict, plan: _Plan) -> str:
     for case in spec["cases"]:
         lines += [f"    def {case['name']}(self):", *setup]
         lines += [
-            f"        obj = {spec['target']}.objects.create({create_args})",
+            f"        obj = {create_call}",
             "        obj.refresh_from_db()",
         ]
         field_name = case["field"]

@@ -8,7 +8,8 @@ from nodes.integration_generation import (
     ACCEPTED_STATUSES, _group_of, _introspect_urls, _resolve_instance, _test_name_stem,
 )
 from nodes.test_generation import (
-    _FILE_UPLOAD, _IMAGE_UPLOAD, _Planner, _introspect_project, _join_args, _name_models, _var_name, media_support,
+    _FILE_UPLOAD, _IMAGE_UPLOAD, _Planner, _create_call, _introspect_project, _join_args, _name_models, _var_name,
+    media_support,
 )
 from state import AgentState, TestCaseSpec, TestSpec
 
@@ -16,6 +17,20 @@ from state import AgentState, TestCaseSpec, TestSpec
 # then look for in a page or in the database.
 _MARKER_TYPES = {"CharField", "TextField", "SlugField", "EmailField", "URLField"}
 _MARKER_FORM_KINDS = {"char", "email", "url", "slug"}
+
+# A password that passes Django's default validators: long enough, not a common
+# password, not all digits, and not similar to the generated username or email.
+_PASSWORD_VALUE = '"Zq7!kLm#4vRb2Xp"'
+
+# Lines added after POSTing generated data to a form. If the form rejects the data,
+# the generated data was wrong, so the flow is inconclusive: skip it, and never
+# report it as a fault in the project.
+_SKIP_IF_FORM_REJECTED = [
+    'form = response.context.get("form") if response.context is not None else None',
+    'form_errors = getattr(form, "errors", None)',
+    "if form_errors:",
+    '    self.skipTest("The form rejected the generated data, so this flow was not tested: " + form_errors.as_text())',
+]
 
 # POST values for fields that are not markers, by form field kind.
 _FORM_VALUES = {
@@ -43,7 +58,9 @@ def _marker_value(model_name: str, field: dict) -> str:
         return f"{slug}@example.com"
     if field["type"] == "URLField":
         return f"https://{slug}.example.com"
-    return words.capitalize()
+    # No spaces: the value may be posted to a field that has a validator (a username
+    # rejects spaces), so keep it to letters, digits and underscores.
+    return re.sub(r"\W+", "_", words).capitalize()
 
 
 class _Setup:
@@ -93,7 +110,7 @@ class _Setup:
                     marker = (field["name"], _marker_value(info["model"], field))
                     break
         args = [(name, repr(marker[1]) if marker and name == marker[0] else expr) for name, expr in plan.args]
-        self._add(f"{var} = <<{label}>>.objects.create({_join_args(args)})")
+        self._add(f"{var} = {_create_call(f'<<{label}>>', self.planner.models[label], args)}")
         return var, marker
 
 
@@ -206,9 +223,12 @@ class _GroupBuilder:
                     return None, None, f"required form field '{name}' has a type the generator cannot fill"
                 continue
             if (marker is None and kind in _MARKER_FORM_KINDS and name not in exclude
+                    and "password" not in name.lower()
                     and fields.get(name, {}).get("type") in _MARKER_TYPES):
                 marker = (name, _marker_value(model_info["model"], fields[name]))
                 entries.append((name, repr(marker[1])))
+            elif kind == "char" and "password" in name.lower():
+                entries.append((name, _PASSWORD_VALUE))
             elif kind in _FORM_VALUES:
                 entries.append((name, _FORM_VALUES[kind]))
             elif kind in ("choice", "multi_choice"):
@@ -267,6 +287,7 @@ class _GroupBuilder:
             _url_line(url), *self._data_lines(entries),
             "response = self.client.post(url, data)",
             "self.assertIn(response.status_code, ACCEPTED_STATUSES, f\"POST {url} returned {response.status_code}\")",
+            *_SKIP_IF_FORM_REJECTED,
             f"self.assertEqual(<<{model_info['label']}>>.objects.{lookup}.count(), 1,",
             f"                 f\"POST {{url}} returned {{response.status_code}} but no {model_name} was saved\")",
         ]
@@ -303,6 +324,7 @@ class _GroupBuilder:
             "response = self.client.post(url, data)",
             "self.assertIn(response.status_code, ACCEPTED_STATUSES, f\"POST {url} returned {response.status_code}\")",
             f"{var}.refresh_from_db()",
+            *_SKIP_IF_FORM_REJECTED,
             f"self.assertEqual({var}.{marker[0]}, {marker[1]!r}, f\"POST {{url}} returned {{response.status_code}} but the object was not updated\")",
         ]
         self._done(url, what, f"test_{stem}_flow_updates_object",
