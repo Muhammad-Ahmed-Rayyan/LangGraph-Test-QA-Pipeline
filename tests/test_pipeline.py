@@ -1019,3 +1019,28 @@ def test_unseen_blog_fixture_reports_no_false_faults():
     names = [test["name"] for test in result["test_results"]["tests"]]
     assert any(name.endswith("ProfileModelTests.test_user_relation_round_trips") for name in names)
     assert any(name.endswith("test_register_flow_creates_object") for name in names)
+
+def test_failures_caused_by_one_missing_table_become_one_missing_migrations_fault(tmp_path, monkeypatch):
+    message = "django.db.utils.OperationalError: no such table: crud_app_product"
+    trace = "Traceback (most recent call last):\n" + message
+    tests = [
+        {"name": f"crud_app.tests_generated.M.test_{number}", "test_type": "unit", "outcome": "error",
+         "message": message, "traceback": trace}
+        for number in range(3)
+    ] + [
+        {"name": "crud_app.tests_system_generated.S.test_page", "test_type": "system", "outcome": "error",
+         "message": message, "traceback": trace},
+        {"name": "crud_app.tests_generated.M.test_other", "test_type": "unit", "outcome": "failed",
+         "message": "AssertionError: 2 != 1", "traceback": "AssertionError: 2 != 1"},
+    ]
+    state, _ = _state_for(tmp_path, monkeypatch, tests, failed=1, errored=4, total=5)
+
+    faults = report_module.report_node(state)["report_json"]["faults"]
+
+    assert [fault["category"] for fault in faults] == ["missing_migrations", "assertion_error"]
+    first = faults[0]
+    assert (first["id"], faults[1]["id"]) == ("F1", "F2")
+    assert len(first["affected_tests"]) == 4 and first["confidence"] == "high"
+    assert first["suspected_location"] == "crud_app/migrations/"
+    assert "makemigrations" in first["message"]
+    assert faults[1]["affected_tests"] == []

@@ -536,7 +536,7 @@ def integration_generation_node(state: AgentState) -> AgentState:
             + cleanup
             + "    def setUp(self):\n"
               "        # A failing view should surface as a failed assertion with its status code.\n"
-              "        self.client = Client(raise_request_exception=False)\n\n"
+              "        elf.client = Client()\n\n"
             + body
         )
         rel_path = f"{group}/tests_integration_generated.py"

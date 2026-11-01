@@ -12,7 +12,8 @@
     "summary.skipped": "Tests that chose not to run, for example a form flow whose generated data the form rejected. They count in total, never in passed, and are never faults.",
     "skipped_tests": "One entry per skipped test with the reason it gave. Empty when nothing was skipped.",
     "faults[].confidence": "high: an assertion failed, or the error passed through the project's own code. low: the error was raised while the generated test was building its own objects with no frame in the project's code, or the generated test module failed to load. A low-confidence fault is kept because it can still be real, but check the test setup before changing project code.",
-    "faults[].confidence_note": "Why the confidence is low. Empty when confidence is high."
+    "faults[].confidence_note": "Why the confidence is low. Empty when confidence is high.",
+    "faults[].affected_tests": "Failures that share one cause are reported as one fault. This lists every test that failed because of it. Empty for a fault that belongs to one test. category missing_migrations means a table the project's models need is never created, because its migrations are missing."
   },
   "examples": {
     "blocked": {
@@ -70,7 +71,8 @@
           "traceback": "...full traceback...",
           "suspected_location": "crud_app/models.py",
           "confidence": "high",
-          "confidence_note": ""
+          "confidence_note": "",
+          "affected_tests": []
         }
       ],
       "skipped_tests": []

@@ -117,6 +117,53 @@ def _report_outcome(status: str | None, test_results: dict | None) -> str:
     return "tests_passed"
 
 
+_NO_SUCH_TABLE_RE = re.compile(r"no such table:\s*([\w.]+)", re.IGNORECASE)
+
+
+def _missing_table(test_outcome: dict) -> str | None:
+    """The table name when a failure is caused by a table that was never created."""
+    text = f"{test_outcome.get('message', '')}\n{test_outcome.get('traceback', '')}"
+    match = _NO_SUCH_TABLE_RE.search(text)
+    return match.group(1) if match else None
+
+
+def _missing_migrations_fault(number: int, table: str, tests: list[dict]) -> dict:
+    """One fault for every test that failed because the same table does not exist.
+
+    Fifteen failures with one cause are one problem for the Developer agent, not
+    fifteen. The individual tests stay listed under affected_tests.
+    """
+    first = tests[0]
+    app = first.get("name", "").split(".", 1)[0]
+    return {
+        "id": f"F{number}",
+        "test_name": first.get("name", "unknown"),
+        "test_type": first.get("test_type", "unit"),
+        "app": app,
+        "category": "missing_migrations",
+        "message": (
+            f"The database has no table '{table}', so {len(tests)} test(s) could not run. The project's models "
+            "are not covered by its migrations, so the table is never created. Create the migration files "
+            "(makemigrations) and add them to the project."
+        ),
+        "traceback": first.get("traceback", ""),
+        "suspected_location": f"{app}/migrations/" if table.startswith(f"{app}_") else "",
+        "confidence": "high",
+        "confidence_note": "",
+        "affected_tests": [test.get("name", "unknown") for test in tests],
+    }
+
+
+def write_report(report: dict, project_name: str) -> Path:
+    """Save a report as reports/<project name>_report.json in this repository."""
+    repository_root = Path(__file__).resolve().parents[1]
+    reports_dir = repository_root / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report_path = reports_dir / f"{project_name}_report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report_path
+
+
 def report_node(state: AgentState) -> AgentState:
     """Build the QA report and save it in this repository's reports directory."""
     project = state.get("project") or {}
@@ -158,8 +205,17 @@ def report_node(state: AgentState) -> AgentState:
     faults = []
     if outcome == "tests_failed" and test_results:
         fault_number = 0
-        for test in test_outcomes:
-            if test.get("outcome") in ("passed", "skipped"):
+        failing = [test for test in test_outcomes if test.get("outcome") not in ("passed", "skipped")]
+        schema_groups: dict[str, list[dict]] = {}
+        for test in failing:
+            table = _missing_table(test)
+            if table:
+                schema_groups.setdefault(table, []).append(test)
+        for table, group in schema_groups.items():
+            fault_number += 1
+            faults.append(_missing_migrations_fault(fault_number, table, group))
+        for test in failing:
+            if _missing_table(test):
                 continue
             fault_number += 1
             message = test.get("message", "Test failed")
@@ -181,6 +237,7 @@ def report_node(state: AgentState) -> AgentState:
                 "suspected_location": _project_relative_location(test, project_root),
                 "confidence": confidence,
                 "confidence_note": confidence_note,
+                "affected_tests": [],
             })
 
     # Tests that chose not to run (for example a form that rejected the generated
@@ -232,11 +289,7 @@ def report_node(state: AgentState) -> AgentState:
         "skipped_tests": skipped_tests,
     }
 
-    repository_root = Path(__file__).resolve().parents[1]
-    reports_dir = repository_root / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    report_path = reports_dir / f"{project_name}_report.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    write_report(report, project_name)
 
     return {
         **state,
