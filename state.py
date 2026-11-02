@@ -97,6 +97,10 @@ class AgentState(TypedDict, total=False):
 
     report_json: dict
 
+    # Set by the production readiness node when the tests passed. The same data is in
+    # report_json["production"].
+    production_report: dict
+
     # How many times the run has looped back to the Developer agent. The first
     # run is attempt 1 (retry_count 0); the report records it as "attempt".
     retry_count: int

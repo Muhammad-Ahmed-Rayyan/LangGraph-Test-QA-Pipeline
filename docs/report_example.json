@@ -13,6 +13,7 @@
     "skipped_tests": "One entry per skipped test with the reason it gave. Empty when nothing was skipped.",
     "faults[].confidence": "high: an assertion failed, or the error passed through the project's own code. low: the error was raised while the generated test was building its own objects with no frame in the project's code, or the generated test module failed to load. A low-confidence fault is kept because it can still be real, but check the test setup before changing project code.",
     "faults[].confidence_note": "Why the confidence is low. Empty when confidence is high.",
+    "production": "Present only when the tests passed. verdict is ready, ready_with_warnings or not_ready. Each finding has an id, a severity (high blocks a release, medium and low warn), a category, a message and a location. Secret values are never copied into the report: only the kind, the file and the line. entrypoint is the module a web server starts, such as crud_project.wsgi.",
     "faults[].affected_tests": "Failures that share one cause are reported as one fault. This lists every test that failed because of it. Empty for a fault that belongs to one test. category missing_migrations means a table the project's models need is never created, because its migrations are missing."
   },
   "examples": {
@@ -92,7 +93,18 @@
           "test_type": "system",
           "reason": "The form rejected the generated data, so this flow was not tested: ..."
         }
-      ]
+      ],
+      "production": {
+        "verdict": "not_ready",
+        "checks_run": ["django_deploy_check", "migrations", "settings", "secrets", "dependencies", "entrypoint"],
+        "findings": [
+          {"id": "P1", "severity": "high", "category": "deploy_check", "message": "[security.W018] You should not have DEBUG set to True in deployment.", "location": "crud_project.settings"},
+          {"id": "P2", "severity": "high", "category": "secrets", "message": "A URL with a username and password inside it (crud_project/settings.py, line 25). Move it to an environment variable and treat the exposed value as compromised.", "location": "crud_project/settings.py"},
+          {"id": "P3", "severity": "medium", "category": "dependencies", "message": "1 package(s) are not pinned to a version (pillow). A later install can pull in different code.", "location": "requirements.txt"}
+        ],
+        "entrypoint": {"wsgi": "crud_project.wsgi", "asgi": "crud_project.asgi"},
+        "artifacts": []
+      }
     }
   }
 }

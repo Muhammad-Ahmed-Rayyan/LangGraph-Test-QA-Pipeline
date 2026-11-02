@@ -98,11 +98,16 @@ def _fault_confidence(test_outcome: dict, root_dir: Path) -> tuple[str, str]:
         else:
             project_frame = True
 
-    if not project_frame and ".objects." in last_generated_code:
+    if not project_frame:
+        if ".objects." in last_generated_code:
+            return "low", (
+                "The error was raised while the generated test was creating its own objects, and no frame "
+                "is in the project's code. Check whether the test setup is at fault (a signal or a constraint "
+                "the generator did not account for) before changing project code."
+            )
         return "low", (
-            "The error was raised while the generated test was creating its own objects, and no frame "
-            "is in the project's code. Check whether the test setup is at fault (a signal or a constraint "
-            "the generator did not account for) before changing project code."
+            "The error was raised by the generated test's own code, and no frame is in the project's code. "
+            "Check the generated test file before changing project code."
         )
     return "high", ""
 

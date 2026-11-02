@@ -69,18 +69,18 @@ a `blocked` report, because nothing fixes it. The buggy one also ends with `need
 
 ```mermaid
 flowchart TD
-    START([start])
-    END([end])
     START --> ingestion
     ingestion --> runnability_check
-    runnability_check -->|runnable| test_generation
+    runnability_check -->|ready| test_generation
     runnability_check -->|blocked| report
     test_generation --> integration_generation
     integration_generation --> system_generation
     system_generation --> test_execution
     test_execution --> report
+    report -->|tests_passed| production_readiness
     report -->|tests_failed or blocked, retries left| developer_feedback
-    report -->|tests_passed, execution_failed, or retries used up| finalize
+    report -->|otherwise| finalize
+    production_readiness --> finalize
     developer_feedback -->|blocked| runnability_check
     developer_feedback -->|tests_failed| test_generation
     finalize --> END

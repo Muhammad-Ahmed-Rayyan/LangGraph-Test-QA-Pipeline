@@ -1,108 +1,183 @@
 # Architecture
 
-The pipeline takes a Django project and answers one question: does the code behave
-the way its models, URLs and forms say it should? It builds the project's environment,
-writes unit, integration and system tests from what the code declares, runs only those
-tests against an in-memory database, and writes a JSON report. A failing report goes back
-to the Developer agent, up to three times.
+The Testing/QA agent takes the code a Software Developer agent produced (a zip file or an extracted
+folder), tests it honestly, and returns a JSON report. The Developer agent reads that report to fix its
+errors. When the tests pass, the agent also checks whether the project could be shipped. It is built as a
+LangGraph state graph, so every stage is a node that reads and writes one shared state.
+
+Scope: functional testing (unit, integration and system tests) of Django projects. Load, performance and
+security testing need servers and are out of scope. The agent never deploys anything.
 
 ## The graph
 
 ```mermaid
 flowchart TD
-    START([start])
-    END([end])
     START --> ingestion
     ingestion --> runnability_check
-    runnability_check -->|runnable| test_generation
+    runnability_check -->|ready| test_generation
     runnability_check -->|blocked| report
     test_generation --> integration_generation
     integration_generation --> system_generation
     system_generation --> test_execution
     test_execution --> report
+    report -->|tests_passed| production_readiness
     report -->|tests_failed or blocked, retries left| developer_feedback
-    report -->|tests_passed, execution_failed, or retries used up| finalize
+    report -->|otherwise| finalize
+    production_readiness --> finalize
     developer_feedback -->|blocked| runnability_check
     developer_feedback -->|tests_failed| test_generation
     finalize --> END
 ```
 
-The same diagram is in the README. `tests/test_pipeline.py` compares both copies with the
-compiled graph, so a change to `graph.py` that is not reflected here fails a test.
+The same diagram is in `README.md`. A test compares both with the graph that LangGraph compiles, so a
+change to `graph.py` that is not reflected here fails the test suite.
 
-## What each node does
+## How one run goes
 
-| Node | Reads | Writes | What it does |
-|---|---|---|---|
-| `ingestion` | `zip_path` or `work_dir` | `work_dir`, `project` | Unzips, finds the project root, and records `manage.py`, `requirements.txt`, documentation files and the apps (every folder that holds a `models.py`). |
-| `runnability_check` | `project` | `runnable`, `setup_errors`, `status` | Creates a throwaway virtual environment next to the project (`_venv_<project name>`), installs `requirements.txt`, and runs `manage.py check`. Sets `status` to `blocked` or `ready_for_test_generation`. |
-| `test_generation` | `project`, `status` | `test_specs`, `test_files` | Unit tests. For each model it creates a valid object and checks that every supported field and relation reads back what was saved. A model it cannot fill is skipped and the reason goes into `skipped_reason`. |
-| `integration_generation` | `project`, `status` | adds to `test_specs`, `test_files` | Integration tests. Reads the URL patterns and sends a GET to each URL that belongs to one of the project's apps, once as an anonymous visitor and once logged in. 404 and 500 fail. |
-| `system_generation` | `project`, `status` | adds to `test_specs`, `test_files` | System tests. Reads each view's source, template and form, then walks full flows: a page that lists stored objects, a create flow through a form, an update flow and a delete flow. |
-| `test_execution` | `project`, `test_files` | `test_results` | Writes a `test_settings.py` that replaces the project's database with in-memory SQLite, runs only the generated modules through `manage.py test`, and parses the output. |
-| `report` | everything above | `report_json` | Builds the report and writes `reports/<project name>_report.json`. |
-| `developer_feedback` | `report_json`, `retry_count` | `retry_count`, empties `test_specs`, `test_files`, `test_results` | Stand-in for the Developer agent. Writes `reports/<project name>_developer_request.json` and counts the retry. It never changes code. |
-| `finalize` | `report_json` | `status` | Sets the final status once the run is over. |
+1. The project is unpacked and scanned.
+2. The agent checks that the project can install its dependencies and boot. If it cannot, no tests are
+   written. The run goes straight to the report with the outcome `blocked`.
+3. Unit, integration and system tests are generated from what the project actually contains: its models,
+   its URLs and its forms.
+4. The generated tests run against an in-memory SQLite database, never the project's own database.
+5. The report is written as JSON. Faults in it are what the Developer agent reads.
+6. If the tests passed, the production checks run and their findings are added to the report.
+7. If the tests failed or the project would not boot, the run can go back to the Developer agent, up to a
+   fixed number of retries, and then it stops.
 
-The three generators write different file names on purpose, because `test_execution` works out
-the test type from the module name:
+## The nodes
 
-| File | Test type |
-|---|---|
-| `<app>/tests_generated.py` | unit |
-| `<app>/tests_integration_generated.py` | integration |
-| `<app>/tests_system_generated.py` | system |
+- `ingestion`: accepts a `.zip` or an already extracted folder. Extracts a zip into a clean folder every run,
+  steps into a single wrapper folder, and finds the documentation, `manage.py`, `requirements.txt` and the
+  Django apps. Writes `project`.
+- `runnability_check`: creates a throwaway virtual environment for the project, installs its requirements,
+  and runs `manage.py check`. Each step has a time limit, and a timeout becomes a normal setup error, not a
+  crash. Writes `runnable`, `setup_errors` and `status` (`ready_for_test_generation` or `blocked`).
+- `test_generation`: inspects the project's models inside its own environment and writes one
+  `tests_generated.py` per app (unit tests). It fills every field it knows how to fill so the object is valid,
+  creates related objects first, and uses `update_or_create` for one-to-one links so a signal that already
+  created the row does not cause a false failure. A model it cannot build a valid object for is skipped and
+  the reason is recorded in `test_specs`.
+- `integration_generation`: reads the project's URL patterns and writes `tests_integration_generated.py`.
+  Each page is requested anonymously and as a logged-in user. A page that crashes (404 or 500) fails.
+- `system_generation`: writes `tests_system_generated.py`. These tests follow complete flows: a page shows
+  stored objects, and a form creates, updates or deletes an object. If a form rejects the generated data,
+  the test is skipped, not failed, because the generator was wrong and not the project. Flows that need
+  a login are skipped with the reason recorded.
+- `test_execution`: writes a `test_settings.py` next to the project's settings that swaps the database for
+  in-memory SQLite, then runs only the generated test modules. It tells three outcomes apart: tests ran,
+  some tests were skipped, and the run itself crashed (`could_not_run`).
+- `report`: decides the outcome, builds the report and writes `reports/<project>_report.json`. It runs on
+  every path, including projects that never booted. Failures that share one cause are grouped into one fault.
+- `production_readiness`: runs only when the tests passed. Checks whether the project could be shipped
+  and adds a `production` block to the report. See below.
+- `developer_feedback`: stands in for the Developer agent, which another group builds. Counts the retry and
+  writes `reports/<project>_developer_request.json` for it to read. It does not change any code.
+- `finalize`: sets the final `status` once, after the last report.
 
-Each generator after the first adds to `test_specs` and `test_files`. None of them replaces what
-an earlier one wrote.
+## Shared state
 
-## The loop back to the Developer agent
+Every node reads and writes one `AgentState` (`state.py`). Nothing is passed between nodes any other way.
 
-After `report` the run takes one of these paths.
-
-| Report outcome | Retries left | Next | Final status |
-|---|---|---|---|
-| `tests_passed` | n/a | `finalize` | `completed` |
-| `execution_failed` | n/a | `finalize` | `environment_error` |
-| `tests_failed` | yes | `developer_feedback` | |
-| `blocked` | yes | `developer_feedback` | |
-| `tests_failed` or `blocked` | no | `finalize` | `needs_human_review` |
-
-`execution_failed` means the test run itself crashed, for example because the database was
-unreachable. That is an environment problem, so the Developer agent gets no request for it and a
-person has to look.
-
-The limit is `MAX_RETRIES = 3` in `graph.py`. The first run is attempt 1, so a project that is never
-fixed is run four times and then ends with `needs_human_review`. Each report carries its attempt
-number in the `attempt` field.
-
-### Where the loop re-enters
-
-The loop re-enters at the stage that failed, not at the start.
-
-- `blocked` goes back to `runnability_check`. The problem was dependencies or a failed boot, so the
-  environment has to be checked again. This rebuilds the virtual environment, which is the slow part.
-- `tests_failed` goes back to `test_generation`. The code changed, so the tests are written again from
-  the new code. The environment is reused.
-
-A retry starts from empty `test_specs`, `test_files` and `test_results`. The generators append to those
-lists, so stale values would duplicate specs and could send the executor to tests from the old attempt.
-`developer_feedback` sets them to empty values on purpose, because LangGraph only updates the keys a node
-returns.
-
-### Demo mode
-
-`python graph.py <project> --demo-fix` replaces `developer_feedback` with a mock fixer that undoes the bugs
-seeded in `buggy_example.zip` and `buggy_flow_example.zip`. It exists to show the whole cycle (fail, fix,
-pass) without the real Developer agent, and it does nothing for any other project.
-
-## Statuses
-
-| Status | Set by | Meaning |
+| Key | Written by | Meaning |
 |---|---|---|
-| `pending` | initial | Nothing has run yet. |
-| `blocked` | `runnability_check` | The project could not install or boot. |
-| `ready_for_test_generation` | `runnability_check` | The project boots. The generators and the executor only act on this status. |
-| `completed` | `finalize` | Every test passed. |
-| `environment_error` | `finalize` | The test run crashed. A person has to look. |
-| `needs_human_review` | `finalize` | Tests still failed, or the project still would not boot, after the last retry. |
+| `zip_path`, `work_dir` | caller | the input, either a zip or a folder |
+| `project` | `ingestion` | root folder, apps, `manage.py`, requirements, docs |
+| `runnable`, `setup_errors`, `status` | `runnability_check` | whether the project boots, and why not |
+| `test_specs`, `test_files` | the three generators | what was planned and the generated code |
+| `test_results` | `test_execution` | per-test outcomes, counts, raw output |
+| `report_json` | `report`, `production_readiness` | the report the Developer agent reads |
+| `production_report` | `production_readiness` | the same production block, for convenience |
+| `retry_count` | `developer_feedback` | how many times the run looped back |
+
+A node name must never equal a state key. LangGraph rejects that.
+
+## Outcomes and final status
+
+The report has one of four outcomes, and the run ends with one of four statuses.
+
+| Outcome | Meaning | Final status |
+|---|---|---|
+| `tests_passed` | every test that ran passed | `completed` |
+| `tests_failed` | some tests failed | `needs_human_review` once retries are used up |
+| `blocked` | the project would not install or boot | `needs_human_review` once retries are used up |
+| `execution_failed` | the test run itself crashed, for example a database could not be reached | `environment_error` |
+
+`execution_failed` never loops back to the Developer agent. It is an environment problem, not code the
+Developer agent can fix. The number of retries is `MAX_RETRIES` (3) in `graph.py`. The command line runs
+with no retries unless `--max-retries` or `--demo-fix` is given, because a stub cannot fix anything.
+
+## The loop
+
+When the Developer agent is connected, a `tests_failed` or `blocked` report goes back to it. The run then
+re-enters where the problem was: `blocked` goes back to `runnability_check` (the environment is rebuilt),
+and `tests_failed` goes back to `test_generation` (the code changed, so the tests are regenerated). A run that
+never gets fixed stops after the retry limit, so the loop cannot run forever.
+
+## The report
+
+`docs/report_example.json` documents every field and shows each outcome. In short: `outcome`, `attempt`,
+`project`, `setup`, `summary` (counts, including skipped tests), `faults`, `skipped_tests`, and a
+`production` block when the tests passed.
+
+Reports are written so that a green result cannot be misread:
+
+- A skipped test is counted in `total` but never in `passed`, and it is listed in `skipped_tests`.
+- Every fault has a `confidence`. It is `low` when the error came from the generated test's own code, with no
+  frame in the project's code. A low-confidence fault is kept, because it can still be real, but it tells the
+  reader to check the test before changing the project.
+- A table that the project's migrations never create fails many tests for one reason. They are reported as
+  one `missing_migrations` fault with every affected test listed.
+- A page that crashes shows the real exception and the project file it came from, because the generated
+  tests let the exception through.
+
+## Production readiness
+
+This node answers "is this code ready to ship, and what is in the way?" without a server and without Docker.
+
+| Check | What it looks for |
+|---|---|
+| Django deployment check | `manage.py check --deploy`: DEBUG on, a weak secret key, missing security settings |
+| Migrations | `makemigrations --check`, run on in-memory SQLite |
+| Settings | `ALLOWED_HOSTS` allowing every host, no `STATIC_ROOT`, a SQLite default database |
+| Secrets | passwords, keys and URLs with credentials written in the source. Only the kind, file and line are reported, never the value |
+| Dependencies | unpinned packages, no production web server listed |
+| Entry point | a `wsgi.py` or `asgi.py` a server can start |
+
+Findings have a severity. One `high` finding makes the verdict `not_ready`. Medium and low findings give
+`ready_with_warnings`. No findings gives `ready`. For now the verdict is advice: it does not change the final
+status and does not send anything back to the Developer agent.
+
+## Design decisions
+
+- **A throwaway environment per project.** The target project's own Django version and packages are used, so
+  introspection and tests match the real project, and one broken project cannot affect the next.
+- **Tests never touch the project's database.** A project can point at a hosted database. Running tests
+  against it would try to create and drop a database on someone else's server.
+- **Deterministic generation first.** The generators read the project's real models, URLs and forms. That
+  gives a baseline that can be reproduced and checked, to compare any later LLM-based generator against.
+- **A generated test that cannot justify itself is skipped, not guessed.** Each skip records its reason.
+- **Honest reporting over a clean report.** Failures from the generator's own mistakes are labelled, never
+  hidden, and never passed on as certain faults in the project.
+
+## Known limits
+
+- Django only. Other frameworks and languages are not handled.
+- Unit tests check that a value survives a save and a reload, so they catch few logic bugs.
+- Integration tests check that a page does not crash. They do not check its content.
+- Flows that need a login are not system-tested.
+- A project whose settings are a package (`settings/`) instead of one `settings.py` is not handled.
+- The virtual environment is rebuilt on every run, which takes minutes.
+- The Developer agent is a stub. Production findings do not yet go back through the loop.
+
+## Files
+
+| Path | Purpose |
+|---|---|
+| `graph.py` | the graph, routing, retry limit and the command line |
+| `state.py` | the shared state and result types |
+| `nodes/` | one file per node, plus `env_utils.py` for virtual-environment paths |
+| `docs/report_example.json` | the report contract with one example per outcome |
+| `fixtures/` | zipped test projects: clean, broken, buggy, unseen and others |
+| `tests/` | fast tests, and slow tests that run the whole pipeline on the fixtures |
+| `reports/` | reports written by runs (not committed) |
