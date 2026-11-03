@@ -23,7 +23,9 @@ flowchart TD
     report -->|tests_passed| production_readiness
     report -->|tests_failed or blocked, retries left| developer_feedback
     report -->|otherwise| finalize
-    production_readiness --> finalize
+    production_readiness --> deployment_artifacts
+    deployment_artifacts -->|not_ready, loop on, retries left| developer_feedback
+    deployment_artifacts -->|otherwise| finalize
     developer_feedback -->|blocked| runnability_check
     developer_feedback -->|tests_failed| test_generation
     finalize --> END
@@ -41,7 +43,8 @@ change to `graph.py` that is not reflected here fails the test suite.
    its URLs and its forms.
 4. The generated tests run against an in-memory SQLite database, never the project's own database.
 5. The report is written as JSON. Faults in it are what the Developer agent reads.
-6. If the tests passed, the production checks run and their findings are added to the report.
+6. If the tests passed, the production checks run and their findings are added to the report. A set of
+   deployment files is written next to it.
 7. If the tests failed or the project would not boot, the run can go back to the Developer agent, up to a
    fixed number of retries, and then it stops.
 
@@ -71,6 +74,10 @@ change to `graph.py` that is not reflected here fails the test suite.
   every path, including projects that never booted. Failures that share one cause are grouped into one fault.
 - `production_readiness`: runs only when the tests passed. Checks whether the project could be shipped
   and adds a `production` block to the report. See below.
+- `deployment_artifacts`: runs right after the production checks. Writes a `Dockerfile`, `.dockerignore`,
+  `docker-compose.yml`, `.env.example` and a `DEPLOYMENT.md` checklist to `reports/<project>_deployment/`,
+  built from the entry point and requirements the checks found. It never changes the project and never builds
+  anything. See below.
 - `developer_feedback`: stands in for the Developer agent, which another group builds. Counts the retry and
   writes `reports/<project>_developer_request.json` for it to read. It does not change any code.
 - `finalize`: sets the final `status` once, after the last report.
@@ -114,6 +121,12 @@ re-enters where the problem was: `blocked` goes back to `runnability_check` (the
 and `tests_failed` goes back to `test_generation` (the code changed, so the tests are regenerated). A run that
 never gets fixed stops after the retry limit, so the loop cannot run forever.
 
+Production findings can use the same loop, but only when asked (`--fix-production`, or
+`build_graph(loop_on_production=True)`). A `not_ready` verdict then goes back to the Developer agent, and the
+run ends `needs_human_review` if it is still `not_ready` once the retries are used up. It is off by default
+because a project can be correct and still not production ready (for example a secret written into its
+settings), and nothing can fix that until a real Developer agent is connected.
+
 ## The report
 
 `docs/report_example.json` documents every field and shows each outcome. In short: `outcome`, `attempt`,
@@ -128,6 +141,9 @@ Reports are written so that a green result cannot be misread:
   reader to check the test before changing the project.
 - A table that the project's migrations never create fails many tests for one reason. They are reported as
   one `missing_migrations` fault with every affected test listed.
+- Tests that crash with the same exception on the same line of the project's own code are reported as one
+  fault, with every affected test listed in `affected_tests`. A fault with no frame in the project's code is
+  never merged with another.
 - A page that crashes shows the real exception and the project file it came from, because the generated
   tests let the exception through.
 
@@ -145,8 +161,23 @@ This node answers "is this code ready to ship, and what is in the way?" without 
 | Entry point | a `wsgi.py` or `asgi.py` a server can start |
 
 Findings have a severity. One `high` finding makes the verdict `not_ready`. Medium and low findings give
-`ready_with_warnings`. No findings gives `ready`. For now the verdict is advice: it does not change the final
-status and does not send anything back to the Developer agent.
+`ready_with_warnings`. No findings gives `ready`. By default the verdict is advice: it does not change the final
+status and does not send anything back to the Developer agent (see the loop above).
+
+## Deployment artifacts
+
+The files are written to `reports/<project>_deployment/`, never into the project.
+
+| File | Content |
+|---|---|
+| `Dockerfile` | Python 3.12, the project's requirements, a web server (`gunicorn` for WSGI, `uvicorn` for ASGI, installed if the project does not list one), the system libraries a database driver needs, a non-root user, and the start command from the entry point the checks found |
+| `.dockerignore` | keeps the virtual environment, `.env`, the database file and the generated test files out of the image |
+| `docker-compose.yml` | the web service, plus a Postgres service with a health check when a Postgres driver is listed |
+| `.env.example` | variable names with placeholders only. Secret values from the project are never copied |
+| `DEPLOYMENT.md` | the blocking and other findings as a checklist, the settings the files expect, first-deploy steps and a rollback plan |
+
+Each artifact is checked statically: `manage.py`, the requirements file and the entry point module must exist, and every
+file must have been written. The results are in `production.artifact_checks`. The files are never built or run, so review them before use. They also cannot change the project: if its settings do not read `DJANGO_SECRET_KEY`, `DJANGO_DEBUG` and `DJANGO_ALLOWED_HOSTS` from the environment, `DEPLOYMENT.md` says the settings must change.
 
 ## Design decisions
 
@@ -168,7 +199,8 @@ status and does not send anything back to the Developer agent.
 - Flows that need a login are not system-tested.
 - A project whose settings are a package (`settings/`) instead of one `settings.py` is not handled.
 - The virtual environment is rebuilt on every run, which takes minutes.
-- The Developer agent is a stub. Production findings do not yet go back through the loop.
+- The Developer agent is a stub, so the production loop (`--fix-production`) cannot fix anything yet.
+- The deployment files are generated from the project's files and checked statically. They are never built.
 
 ## Files
 

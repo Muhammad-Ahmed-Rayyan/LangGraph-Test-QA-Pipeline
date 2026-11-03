@@ -80,7 +80,9 @@ flowchart TD
     report -->|tests_passed| production_readiness
     report -->|tests_failed or blocked, retries left| developer_feedback
     report -->|otherwise| finalize
-    production_readiness --> finalize
+    production_readiness --> deployment_artifacts
+    deployment_artifacts -->|not_ready, loop on, retries left| developer_feedback
+    deployment_artifacts -->|otherwise| finalize
     developer_feedback -->|blocked| runnability_check
     developer_feedback -->|tests_failed| test_generation
     finalize --> END
