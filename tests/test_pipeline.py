@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import graph as graph_module
+import nodes.deployment_artifacts as artifacts_module
 import nodes.developer_stub as developer_module
 import nodes.report as report_module
 import nodes.production_readiness as production_module

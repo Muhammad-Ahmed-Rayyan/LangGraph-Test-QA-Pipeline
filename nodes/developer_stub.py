@@ -37,6 +37,7 @@ def _next_attempt(state: AgentState) -> AgentState:
         "test_results": None,
         "test_specs": [],
         "test_files": {},
+        "production_report": {},
         "retry_count": state.get("retry_count", 0) + 1,
     }
 

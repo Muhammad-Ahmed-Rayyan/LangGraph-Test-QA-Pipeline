@@ -112,6 +112,56 @@ def _fault_confidence(test_outcome: dict, root_dir: Path) -> tuple[str, str]:
     return "high", ""
 
 
+_TRACEBACK_FRAME_LINE_RE = re.compile(r'^\s*File ["\'](?P<path>.+?)["\'], line (?P<line>\d+)', re.MULTILINE)
+
+
+def _fault_signature(fault: dict, root_dir: Path) -> str:
+    """Where in the project's own code a fault was raised, as "path:line", or "" when unknown.
+
+    Several tests that crash on the same line of the same view are one problem, not several.
+    """
+    if fault.get("category") == "missing_migrations":
+        return ""
+    root = root_dir.resolve()
+    signature = ""
+    for match in _TRACEBACK_FRAME_LINE_RE.finditer(fault.get("traceback", "")):
+        try:
+            relative = Path(match.group("path")).resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if any(part.lower().startswith("_venv_") for part in relative.parts):
+            continue
+        if _GENERATED_TEST_RE.search(relative.as_posix()):
+            continue
+        signature = f"{relative.as_posix()}:{match.group('line')}"
+    return signature
+
+
+def _group_repeated_faults(faults: list[dict], root_dir: Path) -> list[dict]:
+    """Merge faults with the same category, message and project line into one fault.
+
+    The merged fault keeps the first test as its example and lists every test under
+    affected_tests. A fault with no frame in the project's code is never merged, because
+    nothing proves that two of them share a cause.
+    """
+    merged: dict[tuple, dict] = {}
+    for fault in faults:
+        signature = _fault_signature(fault, root_dir)
+        key = (fault["category"], fault["message"], signature) if signature else ("single", fault["id"])
+        if key in merged:
+            merged[key]["affected_tests"].append(fault["test_name"])
+            continue
+        merged[key] = fault
+        if signature:
+            fault["affected_tests"] = [fault["test_name"]]
+    result = list(merged.values())
+    for number, fault in enumerate(result, start=1):
+        fault["id"] = f"F{number}"
+        if len(fault["affected_tests"]) == 1 and fault["category"] != "missing_migrations":
+            fault["affected_tests"] = []
+    return result
+
+
 def _report_outcome(status: str | None, test_results: dict | None) -> str:
     if status == "blocked":
         return "blocked"
@@ -244,6 +294,8 @@ def report_node(state: AgentState) -> AgentState:
                 "confidence_note": confidence_note,
                 "affected_tests": [],
             })
+
+        faults = _group_repeated_faults(faults, project_root)
 
     # Tests that chose not to run (for example a form that rejected the generated
     # data). They are not faults, but they are listed so nobody reads "all passed"
