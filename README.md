@@ -66,7 +66,7 @@ flowchart TD
 6. `production_readiness` and `deployment_artifacts` run when the tests passed.
 7. `developer_feedback` sends failures back to the Developer agent (a stub today), up to a retry limit.
 
-Details of every node, the shared state and the design decisions are in `docs/architecture.md`.
+Details of every node, the shared state and the design decisions are in [`docs/architecture.md`](docs/architecture.md).
 
 ## The report
 
@@ -114,6 +114,6 @@ pytest                   the whole pipeline on every fixture, about 10 minutes
 - The Developer agent is a stub. `docs/integration.md` explains how to connect the real one.
 
 ## Contributors
-- Muhammad Ahmed Rayyan
-- Javeria Ziad
-- Huzaifa Yaqoob
+- [Muhammad Ahmed Rayyan](https://github.com/Muhammad-Ahmed-Rayyan)
+- [Javeria Ziad](https://github.com/javy7)
+- [Huzaifa Yaqoob](https://github.com/HuzaifaYaqoob52)
