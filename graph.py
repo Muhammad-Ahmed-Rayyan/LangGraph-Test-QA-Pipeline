@@ -83,11 +83,14 @@ def finalize_node(state: AgentState, loop_on_production: bool = False) -> AgentS
     return {**state, "status": status}
 
 
-def build_graph(demo_fix: bool = False, max_retries: int = MAX_RETRIES, loop_on_production: bool = False):
+def build_graph(demo_fix: bool = False, max_retries: int = MAX_RETRIES, loop_on_production: bool = False, developer_node=None):
     """Build the pipeline. With demo_fix=True a mock fixer replaces the Developer
     agent stub so the full loop (fail, fix, pass) can be shown. Demo only.
     max_retries=0 turns the loop off: the run ends after the first report.
-    loop_on_production=True also sends a not_ready production verdict back to the Developer agent."""
+    loop_on_production=True also sends a not_ready production verdict back to the Developer agent.
+    developer_node plugs a real Developer agent into the loop. It is called with the state, must change the
+    code under state["project"]["root_dir"], and must return the state from nodes.developer_stub._next_attempt
+    (which counts the retry and clears the results of the attempt that just ended). See docs/integration.md."""
     graph = StateGraph(AgentState)
 
     graph.add_node("ingestion", ingestion_node)
@@ -99,7 +102,7 @@ def build_graph(demo_fix: bool = False, max_retries: int = MAX_RETRIES, loop_on_
     graph.add_node("report", report_node)
     graph.add_node("production_readiness", production_readiness_node)
     graph.add_node("deployment_artifacts", deployment_artifacts_node)
-    graph.add_node("developer_feedback", demo_fixer_node if demo_fix else developer_feedback_node)
+    graph.add_node("developer_feedback", developer_node or (demo_fixer_node if demo_fix else developer_feedback_node))
     graph.add_node("finalize", lambda state: finalize_node(state, loop_on_production))
 
     graph.set_entry_point("ingestion")

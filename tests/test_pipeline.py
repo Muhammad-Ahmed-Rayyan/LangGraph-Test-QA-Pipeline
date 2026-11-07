@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import testing_qa
 import graph as graph_module
+import nodes.deployment_artifacts as artifacts_module
 import nodes.deployment_artifacts as artifacts_module
 import nodes.developer_stub as developer_module
 import nodes.report as report_module

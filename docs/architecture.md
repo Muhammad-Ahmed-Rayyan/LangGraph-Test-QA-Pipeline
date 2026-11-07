@@ -207,6 +207,7 @@ file must have been written. The results are in `production.artifact_checks`. Th
 | Path | Purpose |
 |---|---|
 | `graph.py` | the graph, routing, retry limit and the command line |
+| `testing_qa.py` | `run_testing_qa(...)`, the entry point other agents call. See `docs/integration.md` |
 | `state.py` | the shared state and result types |
 | `nodes/` | one file per node, plus `env_utils.py` for virtual-environment paths |
 | `docs/report_example.json` | the report contract with one example per outcome |
