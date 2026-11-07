@@ -112,3 +112,8 @@ pytest                   the whole pipeline on every fixture, about 10 minutes
 - Unit tests check that a value survives a save. Integration tests check that a page does not crash. Flows that need a login are not system-tested.
 - A project whose settings are a `settings/` package is not handled yet. The virtual environment is rebuilt on every run.
 - The Developer agent is a stub. `docs/integration.md` explains how to connect the real one.
+
+## Contributors
+- Muhammad Ahmed Rayyan
+- Javeria Ziad
+- Huzaifa Yaqoob
