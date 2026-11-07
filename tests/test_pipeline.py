@@ -7,9 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
+import testing_qa
 import graph as graph_module
+import nodes.deployment_artifacts as artifacts_module
+import nodes.deployment_artifacts as artifacts_module
 import nodes.developer_stub as developer_module
 import nodes.report as report_module
+import nodes.production_readiness as production_module
 import nodes.test_execution as execution_module
 import nodes.integration_generation as integration_module
 import nodes.system_generation as system_module
@@ -626,7 +630,7 @@ def test_field_types_fixture_system_flows_cover_forms_choices_edit_and_delete():
 
 
 @pytest.mark.parametrize("outcome, retry_count, expected", [
-    ("tests_passed", 0, "finalize"),
+ ("tests_passed", 0, "production_readiness"),
     ("execution_failed", 0, "finalize"),            # an environment problem, not code the Developer agent can fix
     ("tests_failed", 0, "developer_feedback"),
     ("tests_failed", 2, "developer_feedback"),
@@ -737,6 +741,7 @@ def _stub_pipeline(monkeypatch, tmp_path, outcome_for_attempt):
     monkeypatch.setattr(graph_module, "system_generation_node", lambda s: s)
     monkeypatch.setattr(graph_module, "test_execution_node", lambda s: s)
     monkeypatch.setattr(graph_module, "report_node", report)
+    monkeypatch.setattr(graph_module, "production_readiness_node", lambda s: s)
     return calls
 
 
@@ -1044,3 +1049,120 @@ def test_failures_caused_by_one_missing_table_become_one_missing_migrations_faul
     assert first["suspected_location"] == "crud_app/migrations/"
     assert "makemigrations" in first["message"]
     assert faults[1]["affected_tests"] == []
+
+# --- production readiness ------------------------------------------------------
+
+
+def test_deploy_check_output_becomes_findings_with_severities(monkeypatch, tmp_path):
+    output = (
+        "System check identified some issues:\n\nWARNINGS:\n"
+        "?: (security.W004) You have not set a value for the SECURE_HSTS_SECONDS setting.\n\tHINT: Set it.\n"
+        "?: (security.W018) You should not have DEBUG set to True in deployment.\n"
+        "?: (urls.W005) URL namespace 'x' isn't unique.\n"
+        "?: (models.E001) Something is broken.\n"
+    )
+    monkeypatch.setattr(production_module, "_run", lambda command, cwd: (0, output))
+
+    findings = production_module._check_deploy("python", "manage.py", tmp_path, "config.settings")
+
+    assert [finding["severity"] for finding in findings] == ["medium", "high", "low", "high"]
+    assert "[security.W018]" in findings[1]["message"]
+
+
+def test_a_deploy_check_that_crashes_or_times_out_is_a_finding_not_an_exception(monkeypatch, tmp_path):
+    monkeypatch.setattr(production_module, "_run", lambda command, cwd: (1, "Traceback...\nImportError: boom"))
+    crashed = production_module._check_deploy("python", "manage.py", tmp_path, "config.settings")
+    monkeypatch.setattr(production_module, "_run", lambda command, cwd: (None, "timed out after 120 seconds"))
+    timed_out = production_module._check_deploy("python", "manage.py", tmp_path, "config.settings")
+
+    assert crashed[0]["severity"] == "medium" and "boom" in crashed[0]["message"]
+    assert "did not finish" in timed_out[0]["message"]
+
+
+def test_migration_check_tells_missing_migrations_from_a_django_crash(monkeypatch, tmp_path):
+    def check(output, code=1):
+        monkeypatch.setattr(production_module, "_run", lambda command, cwd: (code, output))
+        return production_module._check_migrations("python", "manage.py", tmp_path, "config.test_settings")
+
+    missing = check("Migrations for 'blog':\n  blog/migrations/0003_tag.py\n    + Create model Tag\n")
+    crash = check("Traceback...\nBadMigrationError: Migration 0009 has no Migration class")
+
+    assert missing[0]["severity"] == "high" and missing[0]["location"] == "blog/migrations/"
+    assert crash[0]["severity"] == "medium" and "BadMigrationError" in crash[0]["message"]
+    assert check("No changes detected", code=0) == []
+
+
+def test_secret_scan_reports_where_but_never_the_value(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "settings.py").write_text(
+        'SECRET_KEY = "a-literal-secret-value-123"\n'
+        'DATABASE_URL = "postgres://admin:hunter2pass@db.example.com/app"\n'
+        'FINE_URL = "postgres://user:${DB_PASSWORD}@db.example.com/app"\n', encoding="utf-8")
+    (tmp_path / "app" / "migrations").mkdir(parents=True)
+    (tmp_path / "app" / "migrations" / "0001_initial.py").write_text('KEY = "AKIAABCDEFGHIJKLMNOP"\n')
+    (tmp_path / "app" / "tests_generated.py").write_text('SECRET_KEY = "generated-and-not-scanned-1"\n')
+
+    findings = production_module._scan_secrets(tmp_path)
+
+    assert len(findings) == 2 and all(finding["severity"] == "high" for finding in findings)
+    assert {finding["location"] for finding in findings} == {"config/settings.py"}
+    blob = json.dumps(findings)
+    assert "hunter2pass" not in blob and "a-literal-secret-value" not in blob and "AKIA" not in blob
+
+
+def test_requirements_check_flags_unpinned_packages_and_a_missing_web_server(tmp_path):
+    path = tmp_path / "requirements.txt"
+    path.write_text("Django>=5.0,<6\nPillow\n# a comment\nrequests==2.31.0\n", encoding="utf-8")
+
+    findings = production_module._check_requirements(str(path))
+
+    assert [finding["severity"] for finding in findings] == ["low", "medium"]
+    assert "pillow" in findings[0]["message"]
+    path.write_text("Django==5.0.6\ngunicorn==22.0.0\n", encoding="utf-8")
+    assert production_module._check_requirements(str(path)) == []
+
+
+def test_entrypoints_are_found_as_dotted_modules_and_virtual_environments_are_skipped(tmp_path):
+    (tmp_path / "crud_project").mkdir()
+    (tmp_path / "crud_project" / "wsgi.py").write_text("")
+    (tmp_path / "_venv_x" / "lib").mkdir(parents=True)
+    (tmp_path / "_venv_x" / "lib" / "asgi.py").write_text("")
+
+    assert production_module._find_entrypoints(tmp_path) == {"wsgi": "crud_project.wsgi", "asgi": None}
+
+
+def test_verdict_follows_the_most_serious_finding():
+    assert production_module._verdict([]) == "ready"
+    assert production_module._verdict([{"severity": "low"}]) == "ready_with_warnings"
+    assert production_module._verdict([{"severity": "medium"}, {"severity": "high"}]) == "not_ready"
+
+
+def test_production_node_adds_a_production_block_only_after_passing_tests(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "nodes").mkdir(parents=True)
+    monkeypatch.setattr(report_module, "__file__", str(repo / "nodes" / "report.py"))
+    project = tmp_path / "proj"
+    (project / "config").mkdir(parents=True)
+    (project / "config" / "settings.py").write_text('SECRET_KEY = "a-literal-secret-value-123"\n')
+    (project / "config" / "wsgi.py").write_text("")
+    (project / "manage.py").write_text("")
+    settings_json = json.dumps({"allowed_hosts": ["example.com"], "static_root": "/srv/static", "staticfiles_installed": True,
+                                "database_engines": {"default": "django.db.backends.postgresql"}})
+    monkeypatch.setattr(production_module, "venv_python", lambda root: "python")
+    monkeypatch.setattr(production_module, "_write_test_settings", lambda root, module: "config.test_settings")
+    monkeypatch.setattr(production_module, "_run", lambda command, cwd: (0, settings_json) if "-c" in command else (0, ""))
+    base = {"project": {"root_dir": str(project), "manage_py_path": str(project / "manage.py"),
+                        "is_django_project": True, "requirements_file": None}}
+
+    skipped_state = {**base, "report_json": {"outcome": "tests_failed"}}
+    assert production_module.production_readiness_node(skipped_state) is skipped_state
+
+    result = production_module.production_readiness_node({**base, "report_json": {"outcome": "tests_passed", "attempt": 1}})
+
+    production = result["report_json"]["production"]
+    assert result["production_report"] is production
+    assert production["verdict"] == "not_ready"                                  # the literal SECRET_KEY is high severity
+    assert production["entrypoint"] == {"wsgi": "config.wsgi", "asgi": None}
+    assert [f["id"] for f in production["findings"]] == [f"P{n}" for n in range(1, len(production["findings"]) + 1)]
+    saved = json.loads((repo / "reports" / "proj_report.json").read_text(encoding="utf-8"))
+    assert saved["production"]["verdict"] == "not_ready" and saved["outcome"] == "tests_passed"
